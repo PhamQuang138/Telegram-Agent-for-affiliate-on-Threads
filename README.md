@@ -14,6 +14,8 @@ python -m app.main
 - [Setup](#setup)
 - [Run](#run)
 - [Telegram Commands](#telegram-commands)
+- [AI Affiliate Content Engine](#ai-affiliate-content-engine)
+- [Trend Collection Engine](#trend-collection-engine)
 - [Shopee Draft Generation](#shopee-draft-generation)
 - [Engagement Posts](#engagement-posts)
 - [AI Provider Rotation](#ai-provider-rotation)
@@ -24,6 +26,8 @@ python -m app.main
 ## Features
 
 - Generate Vietnamese Threads drafts for Shopee affiliate products.
+- Generate drafts through a Need -> Persona -> Angle -> Story content pipeline.
+- Collect trend keywords from safe local sources such as catalog data, click history, seasonality, and seed keywords.
 - Create engagement-only posts without product links.
 - Choose engagement personas and content modes.
 - Auto-match catalog links from the local database.
@@ -114,8 +118,13 @@ Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage
 /help
 
 /threads_shopee <keyword or Shopee affiliate link>
+/contentdraft <keyword>
 /autodrafts [limit] [keyword]
 /engagepost <topic>
+/trends
+/trenddrafts [limit]
+/trenddrafts <keyword>
+/performance
 
 /importcsv <csv_path> [group_size]
 /updatelink <csv_path> [group_size]
@@ -137,6 +146,94 @@ Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage
 /delete <post_id>
 /analytics
 ```
+
+## AI Affiliate Content Engine
+
+New product drafts are generated through a text-based content engine instead of writing directly from `product_name`.
+
+Pipeline:
+
+```text
+Product scoring
+Need/problem discovery
+Persona selection
+Angle generation
+Story/post generation
+Quality evaluation
+Duplicate check
+Analytics feedback
+```
+
+Main service files:
+
+```text
+app/services/content_engine.py
+app/services/product_scoring.py
+app/services/content_quality.py
+app/services/content_similarity.py
+prompts/affiliate_content_engine_prompt.txt
+```
+
+Create a content-engine draft:
+
+```text
+/contentdraft quạt mini
+/contentdraft áo thể thao đá bóng
+```
+
+The bot first looks for matching Shopee catalog links. If it finds 2-5 links, it creates a grouped draft and later posts those links as one reply comment. If no matching link exists, the draft is saved as `needs_link`.
+
+Draft metadata is stored on posts when available:
+
+```text
+need
+persona
+angle
+hook_type
+story_type
+target_platform
+click_count
+performance_score
+```
+
+`/performance` shows which persona, angle, and hook type have the best click history.
+
+## Trend Collection Engine
+
+Trend collection is implemented in:
+
+```text
+app/services/trend_service.py
+```
+
+Safe local sources currently used:
+
+- Shopee catalog keyword frequency.
+- Click history from tracked links.
+- Season/calendar keywords.
+- Manual seed keywords from `data/seed_keywords.txt`.
+
+Optional providers are stubbed safely:
+
+- `GoogleTrendsProvider`
+- `ThreadsKeywordSearchProvider`
+
+They do not scrape HTML. If official access or permissions are missing, they skip gracefully.
+
+Show current trend keywords:
+
+```text
+/trends
+```
+
+Generate drafts from trends:
+
+```text
+/trenddrafts 2
+/trenddrafts áo khoác nam
+```
+
+Trend snapshots are cached in SQLite table `trend_snapshots` with a default 6-hour TTL so external sources are not called too often when they are enabled later.
 
 ## Basic Workflow
 
@@ -415,12 +512,28 @@ app/main.py
 app/telegram_bot.py
 app/config.py
 agents/threads_shopee_agent.py
+app/services/content_engine.py
+app/services/product_scoring.py
+app/services/content_quality.py
+app/services/content_similarity.py
+app/services/trend_service.py
 prompts/threads_shopee_prompt.txt
 prompts/threads_engagement_prompt.txt
+prompts/affiliate_content_engine_prompt.txt
 app/services/threads_repository.py
 app/services/threads_service.py
 app/services/shopee_csv_importer.py
 ```
+
+## Tests
+
+Run the offline test suite:
+
+```bash
+python -m pytest
+```
+
+Tests cover product scoring, content quality, duplicate detection, content-engine fallback, and idempotent SQLite migration.
 
 ## Repository Hygiene
 

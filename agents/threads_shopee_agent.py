@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.schemas import ThreadsDraft, ThreadsDraftRequest
-from app.services.threads_repository import previous_similar_posts
+from app.services.content_engine import generate_affiliate_content, prompt_payload
+from app.services.threads_repository import analytics_context, previous_similar_posts
 
 PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "threads_shopee_prompt.txt"
+AFFILIATE_ENGINE_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "affiliate_content_engine_prompt.txt"
 ENGAGEMENT_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "threads_engagement_prompt.txt"
 DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 PRODUCT_CREATOR_STYLE = (
@@ -1136,25 +1138,73 @@ def check_model_availability(limit: int | None = None) -> list[dict[str, str | i
     return results
 
 
-def generate_threads_shopee_draft(db: Session, request: ThreadsDraftRequest) -> ThreadsDraft:
-    keyword = (request.keyword or request.product_name or "sản phẩm Shopee").strip()
-    product_name = _remove_price_context((request.product_name or keyword).strip())
-    previous_posts = "\n---\n".join(previous_similar_posts(db, keyword)) or "None"
+def _request_products(request: ThreadsDraftRequest) -> list[dict]:
+    names = [
+        re.sub(r"^\d+\.\s*", "", line).strip()
+        for line in (request.product_name or request.keyword or "").splitlines()
+        if line.strip()
+    ]
+    if not names:
+        names = [request.product_name or request.keyword or "sản phẩm Shopee"]
+    return [
+        {
+            "product_name": _remove_price_context(name),
+            "affiliate_url": request.affiliate_url or "",
+            "product_url": request.product_url or "",
+            "price": request.price or "",
+            "shop_name": request.shop_name or "",
+            "commission_rate": request.commission_rate or "",
+        }
+        for name in names[:5]
+    ]
 
+
+def _metadata_from_engine_result(result: dict) -> dict:
+    return {
+        "need": str(result.get("need") or "")[:500],
+        "persona": str(result.get("persona") or "")[:255],
+        "angle": str(result.get("angle") or "")[:500],
+        "hook_type": str(result.get("hook_type") or "")[:255],
+        "story_type": str(result.get("story_type") or result.get("hook_type") or "")[:255],
+        "target_platform": "threads",
+    }
+
+
+def _draft_from_engine_result(result: dict, request: ThreadsDraftRequest) -> ThreadsDraft:
+    return _validate(
+        {
+            "content": result.get("content") or "",
+            "cta": result.get("cta") or "",
+            "hashtags": result.get("hashtags") or [],
+            "quality_score": result.get("quality_score") or 70,
+        },
+        request,
+    )
+
+
+def generate_threads_shopee_content(db: Session, request: ThreadsDraftRequest) -> tuple[ThreadsDraft, dict]:
+    keyword = (request.keyword or request.product_name or "sản phẩm Shopee").strip()
+    products = _request_products(request)
+    previous_posts_list = previous_similar_posts(db, keyword)
+    context = analytics_context(db)
+    local_result = generate_affiliate_content(keyword, products, previous_posts_list, context)
+    payload = prompt_payload(keyword, products, previous_posts_list, context)
     prompt = (
-        PROMPT_PATH.read_text(encoding="utf-8")
-        .replace("{keyword}", keyword)
-        .replace("{product_name}", product_name)
-        .replace("{product_url}", request.product_url or "N/A")
-        .replace("{price}", "INTERNAL ONLY - do not mention price or money amounts")
-        .replace("{shop_name}", request.shop_name or "N/A")
-        .replace("{commission_rate}", request.commission_rate or "N/A")
-        .replace("{style}", f"{_product_style(request.style)}\n\n{SHARED_CREATOR_DIRECTION}")
-        .replace("{previous_posts}", previous_posts)
+        AFFILIATE_ENGINE_PROMPT_PATH.read_text(encoding="utf-8")
+        .replace("{keyword}", payload["keyword"])
+        .replace("{products_json}", payload["products_json"])
+        .replace("{previous_posts}", payload["previous_posts"])
+        .replace("{analytics_context}", payload["analytics_context"])
+        .replace("{target_platform}", payload["target_platform"])
+        + "\n\nLOCAL PLAN TO FOLLOW, NOT COPY VERBATIM:\n"
+        + json.dumps(payload["local_plan"], ensure_ascii=False)
+        + "\n\n"
+        + SHARED_CREATOR_DIRECTION
     )
 
     providers = _provider_generators()
     skip_openrouter_free = False
+    last_error: Exception | None = None
     for provider_name, generate in providers:
         if skip_openrouter_free and provider_name.startswith("OpenRouter:"):
             continue
@@ -1168,22 +1218,39 @@ def generate_threads_shopee_draft(db: Session, request: ThreadsDraftRequest) -> 
             if not str(parsed.get("content") or "").strip():
                 raise RuntimeError(f"{provider_name} response missing content. Raw: {_short_debug_text(raw)}")
             draft = _validate(parsed, request)
-            return _ensure_acceptable_draft(draft, request, provider_name)
+            draft = _ensure_acceptable_draft(draft, request, provider_name)
+            metadata = _metadata_from_engine_result({**local_result, **parsed})
+            return draft, metadata
         except OpenRouterFreeDailyLimitExceeded as exc:
+            last_error = exc
             skip_openrouter_free = True
             print(f"Threads Shopee agent {provider_name} free daily limit reached; skipping remaining OpenRouter free models: {exc}")
         except GeminiQuotaExceeded as exc:
+            last_error = exc
             _cooldown_provider(provider_name, 900)
             print(f"Threads Shopee agent {provider_name} quota reached; trying next provider: {exc}")
         except ModelTemporarilyUnavailable as exc:
+            last_error = exc
             _cooldown_provider(provider_name, exc.cooldown_seconds)
             print(f"Threads Shopee agent {provider_name} temporarily unavailable; trying next provider: {exc}")
         except Exception as exc:
+            last_error = exc
             if _should_cooldown_after_output_error(exc):
                 _cooldown_provider(provider_name, 300)
             print(f"Threads Shopee agent {provider_name} fallback: {exc}")
 
-    return _fallback_draft(request)
+    print(f"Threads Shopee content engine local fallback used: {last_error}")
+    draft = _draft_from_engine_result(local_result, request)
+    try:
+        draft = _ensure_acceptable_draft(draft, request, "local content engine")
+    except Exception:
+        draft = _fallback_draft(request)
+    return draft, _metadata_from_engine_result(local_result)
+
+
+def generate_threads_shopee_draft(db: Session, request: ThreadsDraftRequest) -> ThreadsDraft:
+    draft, _metadata = generate_threads_shopee_content(db, request)
+    return draft
 
 
 def generate_threads_engagement_draft(

@@ -45,7 +45,9 @@ def create_post(
     draft: ThreadsDraft,
     status: str,
     affiliate_url: str | None = None,
+    metadata: dict | None = None,
 ) -> ThreadsPost:
+    metadata = metadata or {}
     slug = create_slug() if affiliate_url else None
     post = ThreadsPost(
         keyword=keyword,
@@ -58,6 +60,12 @@ def create_post(
         hashtags=hashtags_to_json(draft.hashtags),
         status=status,
         quality_score=draft.quality_score,
+        need=metadata.get("need"),
+        persona=metadata.get("persona"),
+        angle=metadata.get("angle"),
+        hook_type=metadata.get("hook_type"),
+        story_type=metadata.get("story_type"),
+        target_platform=metadata.get("target_platform", "threads"),
     )
     db.add(post)
     db.commit()
@@ -73,7 +81,9 @@ def create_group_post(
     draft: ThreadsDraft,
     links: list[dict[str, str]],
     status: str = "draft",
+    metadata: dict | None = None,
 ) -> ThreadsPost:
+    metadata = metadata or {}
     post = ThreadsPost(
         keyword=keyword,
         product_name=product_name,
@@ -85,6 +95,12 @@ def create_group_post(
         hashtags=hashtags_to_json(draft.hashtags),
         status=status,
         quality_score=draft.quality_score,
+        need=metadata.get("need"),
+        persona=metadata.get("persona"),
+        angle=metadata.get("angle"),
+        hook_type=metadata.get("hook_type"),
+        story_type=metadata.get("story_type"),
+        target_platform=metadata.get("target_platform", "threads"),
     )
     db.add(post)
     db.flush()
@@ -281,6 +297,27 @@ def update_draft_content(db: Session, post_id: int, draft: ThreadsDraft) -> Thre
     return post
 
 
+def update_post_metadata(db: Session, post_id: int, metadata: dict) -> ThreadsPost | None:
+    post = get_post(db, post_id)
+    if not post:
+        return None
+    for field in [
+        "need",
+        "persona",
+        "angle",
+        "hook_type",
+        "story_type",
+        "target_platform",
+        "impression_estimate",
+        "performance_score",
+    ]:
+        if field in metadata:
+            setattr(post, field, metadata[field])
+    db.commit()
+    db.refresh(post)
+    return post
+
+
 def list_recent_posts(db: Session, limit: int = 10) -> list[ThreadsPost]:
     return list(
         db.scalars(
@@ -333,6 +370,10 @@ def log_click(
             ip_hash=hash_ip(ip),
         )
     )
+    post_link = get_post_link_by_slug(db, slug)
+    post = get_post_by_slug(db, slug) or (post_link.post if post_link else None)
+    if post:
+        post.click_count = (post.click_count or 0) + 1
     db.commit()
 
 
@@ -363,3 +404,55 @@ def analytics_summary(db: Session) -> AnalyticsSummary:
             for row in rows
         ],
     )
+
+
+def analytics_context(db: Session) -> dict:
+    top_rows = db.execute(
+        select(ThreadsPost.id, ThreadsPost.keyword, ThreadsPost.content, func.count(ClickLog.id).label("clicks"))
+        .join(ClickLog, ClickLog.post_id == ThreadsPost.id)
+        .group_by(ThreadsPost.id, ThreadsPost.keyword, ThreadsPost.content)
+        .order_by(func.count(ClickLog.id).desc())
+        .limit(10)
+    ).all()
+    bottom_rows = db.execute(
+        select(ThreadsPost.id, ThreadsPost.keyword, ThreadsPost.content, ThreadsPost.click_count)
+        .where(ThreadsPost.status.in_(["posted", "approved"]), ThreadsPost.click_count == 0)
+        .order_by(ThreadsPost.id.desc())
+        .limit(10)
+    ).all()
+
+    return {
+        "top_posts": [
+            {"post_id": int(row.id), "keyword": str(row.keyword), "clicks": int(row.clicks)}
+            for row in top_rows
+        ],
+        "bottom_posts": [
+            {"post_id": int(row.id), "keyword": str(row.keyword), "clicks": int(row.click_count or 0)}
+            for row in bottom_rows
+        ],
+        "personas": _performance_metric(db, ThreadsPost.persona),
+        "angles": _performance_metric(db, ThreadsPost.angle),
+        "hook_types": _performance_metric(db, ThreadsPost.hook_type),
+    }
+
+
+def performance_summary(db: Session) -> dict:
+    return {
+        "personas": _performance_metric(db, ThreadsPost.persona, limit=5),
+        "angles": _performance_metric(db, ThreadsPost.angle, limit=5),
+        "hook_types": _performance_metric(db, ThreadsPost.hook_type, limit=5),
+    }
+
+
+def _performance_metric(db: Session, column, limit: int = 5) -> list[dict]:
+    rows = db.execute(
+        select(column.label("name"), func.count(ThreadsPost.id).label("posts"), func.coalesce(func.sum(ThreadsPost.click_count), 0).label("clicks"))
+        .where(column.is_not(None), column != "")
+        .group_by(column)
+        .order_by(func.coalesce(func.sum(ThreadsPost.click_count), 0).desc(), func.count(ThreadsPost.id).desc())
+        .limit(limit)
+    ).all()
+    return [
+        {"name": str(row.name), "posts": int(row.posts), "clicks": int(row.clicks or 0)}
+        for row in rows
+    ]

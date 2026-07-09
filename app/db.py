@@ -24,7 +24,30 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     if get_settings().database_url.startswith("sqlite"):
+        _migrate_threads_posts_columns()
         _allow_duplicate_post_link_affiliate_urls()
+
+
+def _migrate_threads_posts_columns() -> None:
+    columns = {
+        "need": "TEXT",
+        "persona": "VARCHAR(255)",
+        "angle": "TEXT",
+        "hook_type": "VARCHAR(255)",
+        "story_type": "VARCHAR(255)",
+        "target_platform": "VARCHAR(64)",
+        "click_count": "INTEGER NOT NULL DEFAULT 0",
+        "impression_estimate": "INTEGER",
+        "performance_score": "FLOAT",
+    }
+    with engine.begin() as connection:
+        existing = {
+            row["name"]
+            for row in connection.exec_driver_sql("PRAGMA table_info('threads_posts')").mappings().all()
+        }
+        for column, column_type in columns.items():
+            if column not in existing:
+                connection.exec_driver_sql(f"ALTER TABLE threads_posts ADD COLUMN {column} {column_type}")
 
 
 def _allow_duplicate_post_link_affiliate_urls() -> None:

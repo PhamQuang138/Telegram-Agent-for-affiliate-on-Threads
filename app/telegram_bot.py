@@ -11,7 +11,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from agents.threads_shopee_agent import (
     check_model_availability,
     generate_threads_engagement_draft,
-    generate_threads_shopee_draft,
+    generate_threads_shopee_content,
     model_status_snapshot,
 )
 from app.config import get_settings
@@ -31,7 +31,9 @@ from app.services.threads_repository import (
     list_catalog_links,
     list_posts_by_status,
     list_recent_posts,
+    performance_summary,
     update_draft_content,
+    update_post_metadata,
     update_status,
 )
 from app.services.threads_service import (
@@ -39,6 +41,7 @@ from app.services.threads_service import (
     create_post as publish_threads_post,
     create_reply as publish_threads_reply,
 )
+from app.services.trend_service import get_trending_keywords
 
 PENDING_UPDATES: dict[int, tuple[str, int]] = {}
 PENDING_ENGAGEMENT_POSTS: dict[int, dict[str, str]] = {}
@@ -257,6 +260,63 @@ def _post_link_payloads(links: list) -> list[dict[str, str]]:
     ]
 
 
+def _draft_request_from_links(keyword: str, product_name: str, matched_links: list) -> ThreadsDraftRequest:
+    first_link = matched_links[0] if matched_links else None
+    return ThreadsDraftRequest(
+        keyword=keyword,
+        product_name=product_name,
+        affiliate_url=first_link.affiliate_url if len(matched_links) == 1 else "",
+        product_url=first_link.product_url if len(matched_links) == 1 else "",
+        price=first_link.price if len(matched_links) == 1 else "",
+        shop_name=first_link.shop_name if len(matched_links) == 1 else "",
+        style="viral product-native",
+    )
+
+
+def _create_content_draft_from_keyword(db: Session, keyword: str) -> ThreadsPost:
+    matched_links = find_catalog_links(db, keyword, limit=5)
+    product_name = keyword
+    if matched_links:
+        product_name = "\n".join(
+            f"{index}. {link.product_name}"
+            for index, link in enumerate(matched_links, start=1)
+        )
+
+    draft, metadata = generate_threads_shopee_content(
+        db,
+        _draft_request_from_links(keyword, product_name, matched_links),
+    )
+    if len(matched_links) >= 2:
+        return create_group_post(
+            db,
+            keyword=keyword,
+            product_name=product_name,
+            draft=draft,
+            links=_post_link_payloads(matched_links),
+            status="draft",
+            metadata=metadata,
+        )
+    if len(matched_links) == 1:
+        return create_post(
+            db,
+            keyword=keyword,
+            product_name=product_name,
+            affiliate_url=matched_links[0].affiliate_url,
+            draft=draft,
+            status="draft",
+            metadata=metadata,
+        )
+    return create_post(
+        db,
+        keyword=keyword,
+        product_name=product_name,
+        affiliate_url=None,
+        draft=draft,
+        status="needs_link",
+        metadata=metadata,
+    )
+
+
 def _import_limit() -> int | None:
     limit = get_settings().import_generate_limit
     return limit if limit > 0 else None
@@ -370,6 +430,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 /status
 /queue
 /autodrafts [limit] [keyword]
+/contentdraft <keyword>
+/trends
+/trenddrafts [limit hoặc keyword]
+/performance
 /engagepost <topic>
 /view <post_id>
 /regenerate <post_id>
@@ -529,7 +593,7 @@ async def autodrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         for group in groups:
             post_keyword = keyword or f"list {len(group)} mon Shopee dang xem"
             product_name = _product_summary_from_links(group)
-            draft = generate_threads_shopee_draft(
+            draft, metadata = generate_threads_shopee_content(
                 db,
                 ThreadsDraftRequest(
                     keyword=post_keyword,
@@ -544,6 +608,7 @@ async def autodrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 draft=draft,
                 links=_post_link_payloads(group),
                 status="draft",
+                metadata=metadata,
             )
             created_posts.append(post.id)
 
@@ -727,6 +792,87 @@ async def choose_engagement_links(update: Update, context: ContextTypes.DEFAULT_
         await query.message.reply_text(_queue_status_text(db))
 
 
+async def contentdraft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyword = " ".join(context.args).strip()
+    if not keyword:
+        await update.message.reply_text("Dung: /contentdraft <keyword>")
+        return
+
+    await update.message.reply_text("Dang tao draft bang AI Affiliate Content Engine...")
+    with _db() as db:
+        post = _create_content_draft_from_keyword(db, keyword)
+        await update.message.reply_text(_preview(post))
+        await _reply_status(update)
+
+
+async def trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _db() as db:
+        items = get_trending_keywords(db, limit=10)
+    if not items:
+        await update.message.reply_text("Chua co trend nao.")
+        return
+    lines = [
+        f"{index}. {item['keyword']} - {item['trend_score']}/100\n   {item['reason']}"
+        for index, item in enumerate(items, start=1)
+    ]
+    await update.message.reply_text("Top trend keywords:\n" + "\n".join(lines))
+
+
+async def trenddrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    limit = 2
+    forced_keyword = ""
+    if args:
+        if args[0].isdigit():
+            limit = max(1, min(5, int(args[0])))
+            forced_keyword = " ".join(args[1:]).strip()
+        else:
+            forced_keyword = " ".join(args).strip()
+            limit = 1
+
+    await update.message.reply_text(
+        "Dang tao draft tu trend..."
+        + (f"\nKeyword ep: {forced_keyword}" if forced_keyword else f"\nSo luong: {limit}")
+    )
+    created_posts: list[int] = []
+    with _db() as db:
+        keywords = [forced_keyword] if forced_keyword else [
+            item["keyword"] for item in get_trending_keywords(db, limit=limit)
+        ]
+        for keyword in keywords[:limit]:
+            post = _create_content_draft_from_keyword(db, keyword)
+            created_posts.append(post.id)
+
+    await update.message.reply_text(
+        "Tao trend drafts xong.\n"
+        f"Bai moi: {', '.join(f'#{post_id}' for post_id in created_posts) if created_posts else 'khong co'}"
+    )
+    await _reply_status(update)
+
+
+async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _db() as db:
+        summary = performance_summary(db)
+
+    def rows_text(title: str, rows: list[dict]) -> str:
+        if not rows:
+            return f"{title}: chua co du lieu"
+        return title + ":\n" + "\n".join(
+            f"- {row['name']}: {row['clicks']} clicks / {row['posts']} posts"
+            for row in rows
+        )
+
+    await update.message.reply_text(
+        "\n\n".join(
+            [
+                rows_text("Persona", summary["personas"]),
+                rows_text("Angle", summary["angles"]),
+                rows_text("Hook type", summary["hook_types"]),
+            ]
+        )
+    )
+
+
 async def threads_shopee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = " ".join(context.args).strip()
     if not text:
@@ -755,7 +901,7 @@ async def threads_shopee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             )
 
-        draft = generate_threads_shopee_draft(
+        draft, metadata = generate_threads_shopee_content(
             db,
             ThreadsDraftRequest(
                 keyword=keyword,
@@ -784,6 +930,7 @@ async def threads_shopee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     for link in matched_links
                 ],
                 status="draft",
+                metadata=metadata,
             )
         else:
             post = create_post(
@@ -793,6 +940,7 @@ async def threads_shopee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 affiliate_url=affiliate_url,
                 draft=draft,
                 status="draft" if affiliate_url else "needs_link",
+                metadata=metadata,
             )
         await update.message.reply_text(_preview(post))
 
@@ -888,7 +1036,7 @@ async def regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else:
             links = get_post_links(db, post.id)
             first_link = links[0] if links else None
-            draft = generate_threads_shopee_draft(
+            draft, metadata = generate_threads_shopee_content(
                 db,
                 ThreadsDraftRequest(
                     keyword=post.keyword,
@@ -901,6 +1049,8 @@ async def regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 ),
             )
         updated = update_draft_content(db, post_id, draft)
+        if post.status != "engagement":
+            updated = update_post_metadata(db, post_id, metadata) or updated
         await update.message.reply_text(_preview(updated))
         await _reply_status(update)
 
@@ -932,7 +1082,7 @@ async def refreshdrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for post in keep:
             links = get_post_links(db, post.id)
             first_link = links[0] if links else None
-            draft = generate_threads_shopee_draft(
+            draft, metadata = generate_threads_shopee_content(
                 db,
                 ThreadsDraftRequest(
                     keyword=post.keyword,
@@ -945,6 +1095,7 @@ async def refreshdrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 ),
             )
             update_draft_content(db, post.id, draft)
+            update_post_metadata(db, post.id, metadata)
             refreshed_ids.append(post.id)
 
         for post in remove:
@@ -1126,6 +1277,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("modelstatus", modelstatus))
     app.add_handler(CommandHandler("checkmodels", checkmodels))
     app.add_handler(CommandHandler("autodrafts", autodrafts))
+    app.add_handler(CommandHandler("contentdraft", contentdraft))
+    app.add_handler(CommandHandler("trends", trends))
+    app.add_handler(CommandHandler("trenddrafts", trenddrafts))
+    app.add_handler(CommandHandler("performance", performance))
     app.add_handler(CommandHandler("engagepost", engagepost))
     app.add_handler(CallbackQueryHandler(choose_engagement_persona, pattern=r"^engage_persona:(daily|controversial|advisor)$"))
     app.add_handler(CallbackQueryHandler(choose_engagement_mode, pattern=r"^engage_mode:(viral|advice|ask|quote|observation)$"))

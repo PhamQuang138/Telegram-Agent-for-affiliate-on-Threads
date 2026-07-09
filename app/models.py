@@ -20,6 +20,15 @@ class ThreadsPost(Base):
     hashtags: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    need: Mapped[str | None] = mapped_column(Text, nullable=True)
+    persona: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    angle: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hook_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    story_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    target_platform: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    click_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    impression_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    performance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     threads_post_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -59,3 +68,15 @@ class ClickLog(Base):
     clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     post: Mapped[ThreadsPost] = relationship(back_populates="clicks")
+
+
+class TrendSnapshot(Base):
+    __tablename__ = "trend_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    trend_score: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    sources_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    region: Mapped[str] = mapped_column(String(16), nullable=False, default="VN", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
