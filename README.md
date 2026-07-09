@@ -424,5 +424,4 @@ npm run dev
 ```
 
 For the current Shopee/Threads workflow, use the Python app.
-#   T e l e g r a m - A g e n t - f o r - a f f i l i a t e - o n - T h r e a d s  
- 
+#
