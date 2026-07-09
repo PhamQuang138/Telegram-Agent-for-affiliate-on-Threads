@@ -67,7 +67,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 AI_PROVIDER_ORDER=openrouter,gemini,openai
 IMPORT_GENERATE_LIMIT=2
 STARTUP_GENERATE_LIMIT=2
-# STARTUP_IMPORT_CSV_PATH=C:\Users\duyqu\Downloads\shopee.csv
+
 ```
 
 Notes:
@@ -275,8 +275,8 @@ python scripts/import_shopee_csv.py "C:\Users\duyqu\Downloads\shopee.csv" --grou
 Scan a new CSV from Telegram before importing:
 
 ```text
-/updatelink C:\Users\duyqu\Downloads\new-file.csv
-/updatelink C:\Users\duyqu\Downloads\new-file.csv 6
+/updatelink file.csv
+/updatelink file.csv 6
 /confirmupdate
 ```
 
@@ -312,7 +312,7 @@ Campaign-style CSV files can use `Tên ưu đãi`.
 To scan a CSV automatically whenever the bot starts:
 
 ```env
-STARTUP_IMPORT_CSV_PATH=C:\Users\duyqu\Downloads\shopee.csv
+STARTUP_IMPORT_CSV_PATH=shopee.csv
 STARTUP_GENERATE_LIMIT=2
 ```
 
