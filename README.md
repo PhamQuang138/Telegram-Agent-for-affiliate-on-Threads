@@ -8,6 +8,19 @@ The Python/FastAPI app is the primary implementation. The older TypeScript sourc
 python -m app.main
 ```
 
+## Contents
+
+- [Features](#features)
+- [Setup](#setup)
+- [Run](#run)
+- [Telegram Commands](#telegram-commands)
+- [Shopee Draft Generation](#shopee-draft-generation)
+- [Engagement Posts](#engagement-posts)
+- [AI Provider Rotation](#ai-provider-rotation)
+- [Import Shopee CSV](#import-shopee-csv)
+- [Threads Posting](#threads-posting)
+- [Repository Hygiene](#repository-hygiene)
+
 ## Features
 
 - Generate Vietnamese Threads drafts for Shopee affiliate products.
@@ -409,6 +422,18 @@ app/services/threads_service.py
 app/services/shopee_csv_importer.py
 ```
 
+## Repository Hygiene
+
+The repository includes a `.gitignore` for local secrets and generated files. Do not commit:
+
+- `.env`
+- local SQLite databases such as `affiliate_agent.db`
+- `node_modules/`
+- Python caches such as `__pycache__/`
+- local notes or agent state
+
+Use `.env.example` for shared configuration documentation.
+
 ## Legacy TypeScript
 
 The original TypeScript bot is still present. It can be type-checked with:
@@ -424,4 +449,3 @@ npm run dev
 ```
 
 For the current Shopee/Threads workflow, use the Python app.
-#
