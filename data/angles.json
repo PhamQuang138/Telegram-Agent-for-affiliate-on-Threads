@@ -1,0 +1,32 @@
+[
+  {
+    "id": "problem_solution",
+    "name": "Vấn đề nhỏ -> gợi ý sản phẩm",
+    "description": "Bắt đầu bằng một tình huống phiền nhẹ, sau đó nhắc sản phẩm như một lựa chọn tham khảo.",
+    "best_for": ["đồ tiện ích", "đồ văn phòng", "đồ gia dụng", "quạt mini"]
+  },
+  {
+    "id": "daily_scene",
+    "name": "Một cảnh đời thường",
+    "description": "Dựng một cảnh quen thuộc trước, sản phẩm chỉ là chi tiết giải quyết cảnh đó.",
+    "best_for": ["bàn làm việc", "phòng trọ", "outfit basic", "đồ học tập"]
+  },
+  {
+    "id": "wishlist_reason",
+    "name": "Wishlist có lý do",
+    "description": "Nói về lý do lưu món đó thay vì thúc người đọc mua.",
+    "best_for": ["áo khoác", "decor phòng", "đồ tiện ích", "phụ kiện"]
+  },
+  {
+    "id": "small_upgrade",
+    "name": "Nâng cấp nhỏ",
+    "description": "Nhấn vào việc một món nhỏ làm sinh hoạt dễ chịu hơn, không phóng đại.",
+    "best_for": ["đồ văn phòng", "setup bàn", "đồ gia dụng", "đồ học tập"]
+  },
+  {
+    "id": "seasonal_context",
+    "name": "Theo mùa/thời tiết",
+    "description": "Gắn sản phẩm với thời tiết, mùa hoặc nhịp sống hiện tại.",
+    "best_for": ["áo khoác", "quạt mini", "áo chống nắng", "du lịch"]
+  }
+]

@@ -1,0 +1,37 @@
+[
+  {
+    "id": "office_minimal",
+    "name": "Dân văn phòng tối giản",
+    "tone": "nhẹ, thực tế, không màu mè",
+    "topics": ["đồ văn phòng", "outfit basic", "bàn làm việc", "đồ tiện ích", "laptop", "chuột"],
+    "avoid": ["nói quá", "teen code", "emoji quá nhiều"]
+  },
+  {
+    "id": "student_budget",
+    "name": "Sinh viên thực tế",
+    "tone": "đời thường, tiết kiệm, hơi hài",
+    "topics": ["đồ học tập", "balo", "đèn học", "phòng trọ", "quạt mini"],
+    "avoid": ["giọng dạy đời", "khoe mẽ"]
+  },
+  {
+    "id": "weekend_sport",
+    "name": "Người chơi thể thao cuối tuần",
+    "tone": "vui, hơi cà khịa nhẹ, năng động",
+    "topics": ["áo thể thao", "đá bóng", "gym", "giày", "bóng đá"],
+    "avoid": ["công kích cá nhân", "fanwar bẩn"]
+  },
+  {
+    "id": "home_setup",
+    "name": "Người thích góc nhà gọn",
+    "tone": "ấm, thực tế, thích sắp xếp",
+    "topics": ["decor phòng", "kệ", "bàn", "đồ gia dụng", "đồ tiện ích"],
+    "avoid": ["quảng cáo lộ", "nói như catalog"]
+  },
+  {
+    "id": "style_basic",
+    "name": "Người mặc basic nhưng kỹ tính",
+    "tone": "gọn, có gu, không phô",
+    "topics": ["áo khoác", "áo thun", "outfit basic", "giày", "balo"],
+    "avoid": ["khen quá đà", "claim chất lượng"]
+  }
+]

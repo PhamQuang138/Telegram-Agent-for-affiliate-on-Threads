@@ -1,10 +1,12 @@
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ENV_PATH, override=True, encoding="utf-8-sig")
 
 
 class Settings(BaseSettings):
@@ -31,7 +33,7 @@ class Settings(BaseSettings):
     post_tracking_link_as_reply: bool = Field(default=True, alias="POST_TRACKING_LINK_AS_REPLY")
     comment_link_target: str = Field(default="affiliate", alias="COMMENT_LINK_TARGET")
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(ENV_PATH), env_file_encoding="utf-8-sig", extra="ignore")
 
 
 @lru_cache

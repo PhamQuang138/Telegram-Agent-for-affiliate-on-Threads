@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,7 @@ SOURCE_WEIGHTS = {
     "click_history": 0.25,
     "season": 0.10,
     "manual_seed": 0.10,
+    "google_suggest": 0.15,
 }
 
 DEFAULT_KEYWORDS = ["đồ tiện ích", "đồ học tập", "decor phòng", "đồ văn phòng", "outfit basic"]
@@ -212,6 +214,52 @@ class ManualSeedProvider:
         ]
 
 
+class GoogleSuggestProvider:
+    source = "google_suggest"
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def collect(self, region: str = "VN") -> list[TrendSignal]:
+        seeds = self._seeds()[:8]
+        signals: list[TrendSignal] = []
+        for seed in seeds:
+            try:
+                response = httpx.get(
+                    "https://suggestqueries.google.com/complete/search",
+                    params={"client": "firefox", "hl": "vi", "gl": region, "q": seed},
+                    headers={"User-Agent": "PODBotTrendScout/1.0 (+local affiliate content research)"},
+                    timeout=3,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                suggestions = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
+            except Exception as exc:
+                logger.info("Google Suggest skipped for seed %s: %s", seed, exc)
+                continue
+            for index, suggestion in enumerate(suggestions[:5]):
+                keyword = _clean_keyword(str(suggestion))
+                if keyword and not _is_generic_keyword(keyword) and not _is_weak_keyword(keyword):
+                    signals.append(
+                        TrendSignal(
+                            keyword=keyword,
+                            source=self.source,
+                            score=max(35, 70 - index * 5),
+                            reason=f"Google Suggest từ seed '{seed}'",
+                        )
+                    )
+        return signals
+
+    def _seeds(self) -> list[str]:
+        seeds = [signal.keyword for signal in SeasonProvider().collect()]
+        seeds.extend(signal.keyword for signal in ManualSeedProvider().collect())
+        try:
+            seeds.extend(signal.keyword for signal in ShopeeCatalogProvider(self.db).collect()[:10])
+        except Exception:
+            pass
+        return list(dict.fromkeys(seed for seed in seeds if seed.strip()))
+
+
 def get_trending_keywords(
     db: Session,
     limit: int = 20,
@@ -231,6 +279,7 @@ def get_trending_keywords(
         ClickHistoryProvider(db),
         SeasonProvider(),
         ManualSeedProvider(),
+        GoogleSuggestProvider(db),
     ]
 
     signals: list[TrendSignal] = []

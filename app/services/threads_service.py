@@ -8,15 +8,15 @@ class ThreadsPostingError(RuntimeError):
     pass
 
 
-def _publish_text(content: str, reply_to_id: str | None = None, retries: int = 3) -> dict:
+def _publish_text(content: str, reply_to_id: str | None = None, retries: int = 3, account: dict | None = None) -> dict:
     settings = get_settings()
 
-    if not settings.threads_access_token or not settings.threads_user_id:
-        raise ThreadsPostingError("THREADS_ACCESS_TOKEN and THREADS_USER_ID are required to post to Threads.")
-
     base_url = settings.threads_api_base_url.rstrip("/")
-    user_id = settings.threads_user_id
-    token = settings.threads_access_token
+    user_id = str((account or {}).get("user_id") or settings.threads_user_id or "").strip()
+    token = str((account or {}).get("access_token") or settings.threads_access_token or "").strip()
+
+    if not token or not user_id:
+        raise ThreadsPostingError("Threads access_token and user_id are required to post to Threads.")
 
     with httpx.Client(timeout=30) as client:
         for attempt in range(1, retries + 1):
@@ -64,9 +64,9 @@ def _publish_text(content: str, reply_to_id: str | None = None, retries: int = 3
     raise ThreadsPostingError("Threads API error: exhausted retries.")
 
 
-def create_post(content: str) -> dict:
-    return _publish_text(content)
+def create_post(content: str, account: dict | None = None) -> dict:
+    return _publish_text(content, account=account)
 
 
-def create_reply(parent_post_id: str, content: str) -> dict:
-    return _publish_text(content, reply_to_id=parent_post_id)
+def create_reply(parent_post_id: str, content: str, account: dict | None = None) -> dict:
+    return _publish_text(content, reply_to_id=parent_post_id, account=account)

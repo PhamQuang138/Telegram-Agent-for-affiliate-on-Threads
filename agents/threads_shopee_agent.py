@@ -82,7 +82,9 @@ Forbidden:
 
 
 class OpenRouterFreeDailyLimitExceeded(RuntimeError):
-    pass
+    def __init__(self, message: str, reset_at: float | None = None):
+        super().__init__(message)
+        self.reset_at = reset_at
 
 
 class GeminiQuotaExceeded(RuntimeError):
@@ -96,6 +98,7 @@ class ModelTemporarilyUnavailable(RuntimeError):
 
 
 _MODEL_COOLDOWNS: dict[str, float] = {}
+_MODEL_STATUS_DETAILS: dict[str, dict[str, str | float]] = {}
 MODEL_CHECK_PROMPT = (
     'Return only valid JSON: {"content":"ok","cta":"","hashtags":[],"quality_score":100}'
 )
@@ -412,22 +415,41 @@ def _soft_parse_json(raw: str) -> dict:
         pass
 
     def extract_text(field: str, next_field: str | None = None) -> str:
-        if next_field:
-            pattern = rf'"{field}"\s*:\s*"(.*?)"\s*,\s*"{next_field}"'
-        else:
-            pattern = rf'"{field}"\s*:\s*"(.*?)"'
-
+        next_fields = [
+            next_field,
+            "content",
+            "cta",
+            "hashtags",
+            "quality_score",
+            "need",
+            "persona",
+            "angle",
+            "hook_type",
+            "reasoning",
+            "selected_products",
+        ]
+        next_fields = [name for name in dict.fromkeys(next_fields) if name and name != field]
+        boundary = "|".join(re.escape(f'"{name}"') for name in next_fields)
+        pattern = rf'"{field}"\s*:\s*"((?:\\.|[^"\\])*)"(?:\s*,\s*(?:{boundary})|\s*[,}}])'
         match = re.search(pattern, cleaned, flags=re.S)
+        if not match:
+            match = re.search(rf'"{field}"\s*:\s*"((?:\\.|[^"\\])*)', cleaned, flags=re.S)
         if not match:
             return ""
 
-        return match.group(1).replace("\\n", "\n").replace('\\"', '"').strip()
+        return (
+            match.group(1)
+            .replace("\\n", "\n")
+            .replace('\\"', '"')
+            .replace("\\/", "/")
+            .strip()
+        )
 
     hashtags_match = re.search(r'"hashtags"\s*:\s*\[(.*?)\]', cleaned, flags=re.S)
     hashtags = re.findall(r'"([^"]+)"', hashtags_match.group(1)) if hashtags_match else []
     score_match = re.search(r'"quality_score"\s*:\s*(\d+)', cleaned)
     hook = extract_text("hook", "content")
-    content = extract_text("content", "cta")
+    content = extract_text("content", "cta") or extract_text("post") or extract_text("text")
 
     return _normalize_parsed_json({
         "hook": hook,
@@ -811,7 +833,10 @@ def _generate_openrouter_model(model: str) -> Callable[[str], str]:
             payload.pop("reasoning", None)
             response = httpx.post(url, headers=headers, json=payload, timeout=25)
         if response.status_code == 429 and "free-models-per-day" in response.text:
-            raise OpenRouterFreeDailyLimitExceeded(response.text[:300])
+            raise OpenRouterFreeDailyLimitExceeded(
+                response.text[:500],
+                reset_at=_openrouter_reset_at(response.text),
+            )
         if response.status_code in {408, 429, 500, 502, 503, 504}:
             retry_after = _retry_after_seconds(response.text, response.headers.get("Retry-After"))
             raise ModelTemporarilyUnavailable(
@@ -980,17 +1005,43 @@ def _retry_after_seconds(message: str, retry_after_header: str | None) -> int:
     return 120
 
 
+def _openrouter_reset_at(message: str) -> float | None:
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        payload = {}
+    headers = (((payload.get("error") or {}).get("metadata") or {}).get("headers") or {}) if isinstance(payload, dict) else {}
+    raw_reset = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+    if raw_reset:
+        try:
+            value = float(raw_reset)
+            return value / 1000 if value > 10_000_000_000 else value
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _provider_on_cooldown(provider_name: str) -> int:
     now = time.time()
     until = _MODEL_COOLDOWNS.get(provider_name, 0)
     if until <= now:
         _MODEL_COOLDOWNS.pop(provider_name, None)
+        _MODEL_STATUS_DETAILS.pop(provider_name, None)
         return 0
     return int(until - now)
 
 
-def _cooldown_provider(provider_name: str, seconds: int) -> None:
-    _MODEL_COOLDOWNS[provider_name] = time.time() + max(15, min(900, seconds))
+def _cooldown_provider(provider_name: str, seconds: int, *, status: str = "cooldown", detail: str = "") -> None:
+    until = time.time() + max(15, min(900, seconds))
+    _MODEL_COOLDOWNS[provider_name] = until
+    _MODEL_STATUS_DETAILS[provider_name] = {"status": status, "detail": detail, "until": until}
+
+
+def _cooldown_provider_until(provider_name: str, until: float, *, status: str = "cooldown", detail: str = "") -> None:
+    if until <= time.time():
+        return
+    _MODEL_COOLDOWNS[provider_name] = until
+    _MODEL_STATUS_DETAILS[provider_name] = {"status": status, "detail": detail, "until": until}
 
 
 def _should_cooldown_after_output_error(exc: Exception) -> bool:
@@ -1081,11 +1132,16 @@ def model_status_snapshot() -> list[dict[str, str | int]]:
     rows: list[dict[str, str | int]] = []
     for provider_name, _ in _provider_generators():
         cooldown = _provider_on_cooldown(provider_name)
+        detail = _MODEL_STATUS_DETAILS.get(provider_name, {})
+        status = str(detail.get("status") or ("cooldown" if cooldown else "ready"))
+        ready_at = int(float(detail.get("until") or 0)) if cooldown else 0
         rows.append(
             {
                 "provider": provider_name,
-                "status": "cooldown" if cooldown else "ready",
+                "status": status,
                 "cooldown_seconds": cooldown,
+                "ready_at": ready_at,
+                "detail": str(detail.get("detail") or ""),
             }
         )
     return rows
@@ -1123,12 +1179,23 @@ def check_model_availability(limit: int | None = None) -> list[dict[str, str | i
             )
         except OpenRouterFreeDailyLimitExceeded as exc:
             skip_openrouter_free = True
-            results.append({"provider": provider_name, "status": "daily_limit", "detail": _short_debug_text(str(exc), 160)})
+            if exc.reset_at:
+                _cooldown_provider_until(provider_name, exc.reset_at, status="quota", detail="OpenRouter free daily limit")
+            else:
+                _cooldown_provider(provider_name, 900, status="quota", detail="OpenRouter free daily limit")
+            cooldown = _provider_on_cooldown(provider_name)
+            results.append({
+                "provider": provider_name,
+                "status": "daily_limit",
+                "detail": _short_debug_text(str(exc), 160),
+                "cooldown_seconds": cooldown,
+                "ready_at": int(time.time() + cooldown) if cooldown else 0,
+            })
         except GeminiQuotaExceeded as exc:
-            _cooldown_provider(provider_name, 900)
+            _cooldown_provider(provider_name, 900, status="quota", detail=str(exc))
             results.append({"provider": provider_name, "status": "quota", "detail": str(exc)})
         except ModelTemporarilyUnavailable as exc:
-            _cooldown_provider(provider_name, exc.cooldown_seconds)
+            _cooldown_provider(provider_name, exc.cooldown_seconds, status="temp_limited", detail=_short_debug_text(str(exc), 160))
             results.append({"provider": provider_name, "status": "temp_limited", "detail": _short_debug_text(str(exc), 160)})
         except Exception as exc:
             if _should_cooldown_after_output_error(exc):
@@ -1164,8 +1231,13 @@ def _metadata_from_engine_result(result: dict) -> dict:
         "need": str(result.get("need") or "")[:500],
         "persona": str(result.get("persona") or "")[:255],
         "angle": str(result.get("angle") or "")[:500],
+        "persona_id": str(result.get("persona_id") or "")[:128],
+        "angle_id": str(result.get("angle_id") or "")[:128],
+        "hook": str(result.get("hook") or "")[:500],
         "hook_type": str(result.get("hook_type") or "")[:255],
         "story_type": str(result.get("story_type") or result.get("hook_type") or "")[:255],
+        "content_type": str(result.get("content_type") or "affiliate_threads")[:128],
+        "diversity_key": str(result.get("diversity_key") or "")[:255],
         "target_platform": "threads",
     }
 
@@ -1224,14 +1296,18 @@ def generate_threads_shopee_content(db: Session, request: ThreadsDraftRequest) -
         except OpenRouterFreeDailyLimitExceeded as exc:
             last_error = exc
             skip_openrouter_free = True
+            if exc.reset_at:
+                _cooldown_provider_until(provider_name, exc.reset_at, status="quota", detail="OpenRouter free daily limit")
+            else:
+                _cooldown_provider(provider_name, 900, status="quota", detail="OpenRouter free daily limit")
             print(f"Threads Shopee agent {provider_name} free daily limit reached; skipping remaining OpenRouter free models: {exc}")
         except GeminiQuotaExceeded as exc:
             last_error = exc
-            _cooldown_provider(provider_name, 900)
+            _cooldown_provider(provider_name, 900, status="quota", detail=str(exc))
             print(f"Threads Shopee agent {provider_name} quota reached; trying next provider: {exc}")
         except ModelTemporarilyUnavailable as exc:
             last_error = exc
-            _cooldown_provider(provider_name, exc.cooldown_seconds)
+            _cooldown_provider(provider_name, exc.cooldown_seconds, status="temp_limited", detail=_short_debug_text(str(exc), 160))
             print(f"Threads Shopee agent {provider_name} temporarily unavailable; trying next provider: {exc}")
         except Exception as exc:
             last_error = exc
@@ -1241,9 +1317,7 @@ def generate_threads_shopee_content(db: Session, request: ThreadsDraftRequest) -
 
     print(f"Threads Shopee content engine local fallback used: {last_error}")
     draft = _draft_from_engine_result(local_result, request)
-    try:
-        draft = _ensure_acceptable_draft(draft, request, "local content engine")
-    except Exception:
+    if _looks_like_bad_content(draft.content) or not draft.content.strip():
         draft = _fallback_draft(request)
     return draft, _metadata_from_engine_result(local_result)
 
@@ -1296,12 +1370,16 @@ def generate_threads_engagement_draft(
             )
         except OpenRouterFreeDailyLimitExceeded as exc:
             skip_openrouter_free = True
+            if exc.reset_at:
+                _cooldown_provider_until(provider_name, exc.reset_at, status="quota", detail="OpenRouter free daily limit")
+            else:
+                _cooldown_provider(provider_name, 900, status="quota", detail="OpenRouter free daily limit")
             print(f"Threads engagement agent {provider_name} free daily limit reached; skipping remaining OpenRouter free models: {exc}")
         except GeminiQuotaExceeded as exc:
-            _cooldown_provider(provider_name, 900)
+            _cooldown_provider(provider_name, 900, status="quota", detail=str(exc))
             print(f"Threads engagement agent {provider_name} quota reached; trying next provider: {exc}")
         except ModelTemporarilyUnavailable as exc:
-            _cooldown_provider(provider_name, exc.cooldown_seconds)
+            _cooldown_provider(provider_name, exc.cooldown_seconds, status="temp_limited", detail=_short_debug_text(str(exc), 160))
             print(f"Threads engagement agent {provider_name} temporarily unavailable; trying next provider: {exc}")
         except Exception as exc:
             if _should_cooldown_after_output_error(exc):

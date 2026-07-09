@@ -1,9 +1,16 @@
 from sqlalchemy import create_engine
 
-from app.services.content_engine import generate_affiliate_content
+from app.services.angle_library import select_angle
+from app.services.content_diversity import should_reduce_repetition
+from app.services.content_engine import generate_affiliate_content, generate_content_ideas
 from app.services.content_quality import evaluate_content
 from app.services.content_similarity import is_too_similar
+from app.services.hook_library import choose_hook, load_hooks
+from app.services.persona_library import select_persona
 from app.services.product_scoring import score_products
+from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
+from app.services.trend_service import GoogleSuggestProvider
+from agents.threads_shopee_agent import _openrouter_reset_at, _soft_parse_json
 
 
 def test_similarity_detects_repeated_opening() -> None:
@@ -44,8 +51,58 @@ def test_content_engine_returns_required_shape_without_ai() -> None:
     assert result["persona"]
     assert result["angle"]
     assert result["hook_type"]
+    assert result["persona_id"]
+    assert result["angle_id"]
+    assert result["diversity_key"]
     assert isinstance(result["selected_products"], list)
     assert 0 <= result["quality_score"] <= 100
+
+
+def test_content_engine_does_not_dump_mixed_catalog_names() -> None:
+    result = generate_affiliate_content(
+        "dân văn phòng",
+        [
+            {"product_name": "ICON Dù Gấp Tự Động 8 Xương UV", "price": "99000"},
+            {"product_name": "[RẺ VÔ ĐỐI] Áo thun nam màu xám cotton", "price": "79000"},
+        ],
+        [],
+        {},
+    )
+    content = result["content"].lower()
+    assert "rẻ vô đối" not in content
+    assert "icon dù" not in content
+    assert "8 xương" not in content
+
+
+def test_libraries_select_reasonable_items() -> None:
+    hooks = load_hooks()
+    hook = choose_hook("question")
+    persona = select_persona("bàn làm việc", {"product_name": "kệ để bàn laptop"})
+    angle = select_angle("bàn làm việc", {"product_name": "kệ để bàn laptop"}, persona)
+    assert hooks
+    assert hook["hook_type"] == "question"
+    assert persona["id"]
+    assert angle["id"]
+
+
+def test_content_diversity_rejects_repeated_key() -> None:
+    candidate = {"diversity_key": "a|b|c|d"}
+    recent = [{"diversity_key": "a|b|c|d"} for _ in range(5)] + [{"diversity_key": "x"} for _ in range(5)]
+    result = should_reduce_repetition(candidate, recent, max_same_key_ratio=0.35)
+    assert not result["passed"]
+
+
+def test_generate_content_ideas() -> None:
+    ideas = generate_content_ideas("quạt mini", [{"product_name": "Quạt mini để bàn"}], {}, count=2)
+    assert len(ideas) == 2
+    assert ideas[0]["idea"]
+
+
+def test_soft_parser_extracts_content_from_partial_engine_json() -> None:
+    raw = '{ "content": "Bàn làm việc bừa đôi khi chỉ cần một món nhỏ để bớt cáu.", "cta": "", "hashtags": [], "quality_score": 82, "need": "gọn bàn"'
+    parsed = _soft_parse_json(raw)
+    assert parsed["content"].startswith("Bàn làm việc bừa")
+    assert parsed["quality_score"] == 82
 
 
 def test_sqlite_post_migration_is_idempotent(monkeypatch) -> None:
@@ -78,6 +135,8 @@ def test_sqlite_post_migration_is_idempotent(monkeypatch) -> None:
     monkeypatch.setattr(db_module, "engine", engine)
     db_module._migrate_threads_posts_columns()
     db_module._migrate_threads_posts_columns()
+    db_module._migrate_topic_memory_table()
+    db_module._migrate_topic_memory_table()
 
     with engine.begin() as connection:
         columns = {
@@ -87,3 +146,51 @@ def test_sqlite_post_migration_is_idempotent(monkeypatch) -> None:
 
     assert "need" in columns
     assert "performance_score" in columns
+    assert "posted_account_name" in columns
+    with engine.begin() as connection:
+        tables = {
+            row["name"]
+            for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").mappings().all()
+        }
+    assert "topic_memory" in tables
+
+
+def test_google_suggest_provider_uses_mocked_request(monkeypatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return ["quạt mini", ["quạt mini để bàn", "quạt mini sạc pin"]]
+
+    def fake_get(*args, **kwargs):
+        return Response()
+
+    monkeypatch.setattr("app.services.trend_service.httpx.get", fake_get)
+    provider = GoogleSuggestProvider(db=None)
+    monkeypatch.setattr(provider, "_seeds", lambda: ["quạt mini"])
+    signals = provider.collect()
+    assert signals
+    assert signals[0].source == "google_suggest"
+
+
+def test_threads_accounts_named_config(monkeypatch) -> None:
+    monkeypatch.setenv("THREADS_ACCOUNTS", "acc1,acc2")
+    monkeypatch.setenv("THREADS_ACC1_USER_ID", "111")
+    monkeypatch.setenv("THREADS_ACC1_ACCESS_TOKEN", "tok1")
+    monkeypatch.setenv("THREADS_ACC1_PERSONA", "office")
+    monkeypatch.setenv("THREADS_ACC1_TOPICS", "bàn làm việc,laptop")
+    monkeypatch.setenv("THREADS_ACC2_USER_ID", "222")
+    monkeypatch.setenv("THREADS_ACC2_ACCESS_TOKEN", "tok2")
+    monkeypatch.setenv("THREADS_ACC2_TOPICS", "áo khoác,outfit")
+
+    accounts = load_threads_accounts()
+    assert len(accounts) == 2
+    assert get_threads_account("acc2")["user_id"] == "222"
+    selected = select_account_for_post({"keyword": "setup bàn làm việc laptop"}, accounts)
+    assert selected["name"] == "acc1"
+
+
+def test_openrouter_reset_at_parses_milliseconds() -> None:
+    raw = '{"error":{"metadata":{"headers":{"X-RateLimit-Reset":"1783641600000"}}}}'
+    assert _openrouter_reset_at(raw) == 1783641600

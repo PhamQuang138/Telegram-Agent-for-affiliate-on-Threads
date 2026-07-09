@@ -1,9 +1,11 @@
 import random
 import time
 import json
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -19,8 +21,10 @@ from app.db import SessionLocal, init_db
 from app.models import ThreadsPost
 from app.schemas import ThreadsDraftRequest
 from app.services.shopee_csv_importer import import_shopee_csv, scan_shopee_csv
+from app.services.content_engine import generate_content_ideas
 from app.services.threads_repository import (
     add_affiliate_link,
+    analytics_context,
     analytics_summary,
     create_group_post,
     create_post,
@@ -41,7 +45,14 @@ from app.services.threads_service import (
     create_post as publish_threads_post,
     create_reply as publish_threads_reply,
 )
+from app.services.threads_account_service import (
+    ThreadsAccountError,
+    get_threads_account,
+    load_threads_accounts,
+    select_account_for_post,
+)
 from app.services.trend_service import get_trending_keywords
+from app.services.topic_memory import is_topic_recently_used, record_topic_usage
 
 PENDING_UPDATES: dict[int, tuple[str, int]] = {}
 PENDING_ENGAGEMENT_POSTS: dict[int, dict[str, str]] = {}
@@ -111,6 +122,17 @@ def _post_meta(post: ThreadsPost) -> dict[str, str]:
     except json.JSONDecodeError:
         return {}
     return {str(key): str(val) for key, val in value.items()}
+
+
+def _post_account_payload(post: ThreadsPost) -> dict:
+    return {
+        "keyword": post.keyword,
+        "product_name": post.product_name,
+        "persona": post.persona,
+        "persona_id": post.persona_id,
+        "angle": post.angle,
+        "content": post.content,
+    }
 
 
 def _public_cta(post: ThreadsPost) -> str:
@@ -287,7 +309,7 @@ def _create_content_draft_from_keyword(db: Session, keyword: str) -> ThreadsPost
         _draft_request_from_links(keyword, product_name, matched_links),
     )
     if len(matched_links) >= 2:
-        return create_group_post(
+        post = create_group_post(
             db,
             keyword=keyword,
             product_name=product_name,
@@ -296,8 +318,10 @@ def _create_content_draft_from_keyword(db: Session, keyword: str) -> ThreadsPost
             status="draft",
             metadata=metadata,
         )
+        record_topic_usage(keyword, [link.id for link in matched_links], post.id)
+        return post
     if len(matched_links) == 1:
-        return create_post(
+        post = create_post(
             db,
             keyword=keyword,
             product_name=product_name,
@@ -306,7 +330,9 @@ def _create_content_draft_from_keyword(db: Session, keyword: str) -> ThreadsPost
             status="draft",
             metadata=metadata,
         )
-    return create_post(
+        record_topic_usage(keyword, [matched_links[0].id], post.id)
+        return post
+    post = create_post(
         db,
         keyword=keyword,
         product_name=product_name,
@@ -315,6 +341,8 @@ def _create_content_draft_from_keyword(db: Session, keyword: str) -> ThreadsPost
         status="needs_link",
         metadata=metadata,
     )
+    record_topic_usage(keyword, [], post.id)
+    return post
 
 
 def _import_limit() -> int | None:
@@ -351,12 +379,16 @@ def _model_row_text(row: dict) -> str:
     provider = str(row.get("provider", "unknown"))
     status = str(row.get("status", "unknown"))
     cooldown = int(row.get("cooldown_seconds", 0) or 0)
+    ready_at = int(row.get("ready_at", 0) or 0)
     detail = str(row.get("detail", "") or "")
     latency = row.get("latency_ms")
 
     suffix = ""
     if cooldown:
-        suffix = f" (~{cooldown}s)"
+        ready_text = datetime.fromtimestamp(ready_at).strftime("%Y-%m-%d %H:%M:%S") if ready_at else "unknown"
+        suffix = f" (~{cooldown}s, ready_at {ready_text})"
+        if detail:
+            suffix += f" - {detail}"
     elif latency is not None:
         suffix = f" ({latency}ms)"
     elif detail:
@@ -434,6 +466,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 /trends
 /trenddrafts [limit hoặc keyword]
 /performance
+/ideas [keyword]
+/accounts
 /engagepost <topic>
 /view <post_id>
 /regenerate <post_id>
@@ -441,7 +475,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 /modelstatus
 /checkmodels [limit]
 /approve <post_id>
-/post <post_id>
+/post <post_id> [account_name]
 /replylinks <post_id>
 /delete <post_id>
 /analytics"""
@@ -818,6 +852,35 @@ async def trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Top trend keywords:\n" + "\n".join(lines))
 
 
+async def ideas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyword = " ".join(context.args).strip()
+    with _db() as db:
+        if not keyword:
+            trend_items = get_trending_keywords(db, limit=1)
+            keyword = trend_items[0]["keyword"] if trend_items else "đồ tiện ích"
+        links = find_catalog_links(db, keyword, limit=5)
+        products = _post_link_payloads(links)
+        ideas_list = generate_content_ideas(keyword, products, analytics_context(db), count=3)
+
+    blocks = []
+    for index, item in enumerate(ideas_list, start=1):
+        product_names = [
+            _short_product_name(product.get("product_name", ""), 70)
+            for product in item.get("selected_products", [])
+            if product.get("product_name")
+        ]
+        blocks.append(
+            f"{index}. Need: {item['need']}\n"
+            f"Persona: {item['persona']}\n"
+            f"Angle: {item['angle']}\n"
+            f"Hook: {item['hook']}\n"
+            f"Idea: {item['idea']}\n"
+            f"San pham hop: {', '.join(product_names) if product_names else 'chua co link phu hop'}"
+        )
+
+    await update.message.reply_text(f"Ideas cho keyword: {keyword}\n\n" + "\n\n".join(blocks))
+
+
 async def trenddrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
     limit = 2
@@ -836,9 +899,15 @@ async def trenddrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     created_posts: list[int] = []
     with _db() as db:
-        keywords = [forced_keyword] if forced_keyword else [
-            item["keyword"] for item in get_trending_keywords(db, limit=limit)
-        ]
+        if forced_keyword:
+            keywords = [forced_keyword]
+        else:
+            keywords = []
+            for item in get_trending_keywords(db, limit=limit * 4):
+                if not is_topic_recently_used(item["keyword"]):
+                    keywords.append(item["keyword"])
+                if len(keywords) >= limit:
+                    break
         for keyword in keywords[:limit]:
             post = _create_content_draft_from_keyword(db, keyword)
             created_posts.append(post.id)
@@ -862,15 +931,64 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             for row in rows
         )
 
+    best = (
+        summary["personas"][0]["name"]
+        if summary.get("personas")
+        else "persona dang co click tot"
+    )
+    weak = (
+        summary["bottom_hook_types"][0]["name"]
+        if summary.get("bottom_hook_types")
+        else "hook lap lai"
+    )
+
     await update.message.reply_text(
         "\n\n".join(
             [
                 rows_text("Persona", summary["personas"]),
                 rows_text("Angle", summary["angles"]),
                 rows_text("Hook type", summary["hook_types"]),
+                rows_text("Keyword", summary["keywords"]),
+                rows_text("Product", summary["products"]),
+                rows_text("Diversity key", summary["diversity_keys"]),
+                rows_text("Bottom persona", summary["bottom_personas"]),
+                rows_text("Bottom angle", summary["bottom_angles"]),
+                rows_text("Bottom hook", summary["bottom_hook_types"]),
+                f"Goi y: nen viet them theo vibe '{best}', va giam bot dang hook '{weak}' neu no co nhieu bai nhung it click.",
             ]
         )
     )
+
+
+async def accounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    accounts_list = load_threads_accounts()
+    if not accounts_list:
+        await update.message.reply_text("Chưa cấu hình Threads account nào.")
+        return
+
+    with _db() as db:
+        rows = []
+        for account in accounts_list:
+            last_post = db.scalar(
+                select(ThreadsPost)
+                .where(ThreadsPost.posted_account_name == account["name"])
+                .order_by(ThreadsPost.id.desc())
+                .limit(1)
+            )
+            last_post_at = last_post.created_at.isoformat() if last_post and last_post.created_at else "chưa có"
+            rows.append(
+                "\n".join(
+                    [
+                        f"- {account['name']} ({account.get('display_name') or account['name']})",
+                        f"  persona: {account.get('persona') or 'chưa đặt'}",
+                        f"  topics: {', '.join(account.get('topics') or []) or 'chưa đặt'}",
+                        f"  config: {'enabled' if account.get('enabled') else 'missing token/user_id'}",
+                        f"  last_post_at: {last_post_at}",
+                    ]
+                )
+            )
+
+    await update.message.reply_text("Threads accounts:\n" + "\n\n".join(rows))
 
 
 async def threads_shopee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1014,45 +1132,89 @@ async def regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("Đang tạo lại nội dung bằng AI...")
 
     with _db() as db:
-        post = get_post(db, post_id)
-        if not post or post.status == "deleted":
-            await update.message.reply_text(f"Không tìm thấy post #{post_id}.")
-            return
+        try:
+            post = get_post(db, post_id)
+            if not post or post.status == "deleted":
+                await update.message.reply_text(f"Không tìm thấy post #{post_id}.")
+                return
 
-        if post.status == "engagement":
             meta = _post_meta(post)
-            mode = meta.get("mode", "viral")
-            draft = generate_threads_engagement_draft(
-                db,
-                post.keyword,
-                style=meta.get("style", _engagement_mode_style(mode)),
-                persona=meta.get("persona", "daily"),
-            )
-            draft.cta = _metadata_cta(
-                persona=meta.get("persona", "daily"),
-                mode=mode,
-                style=meta.get("style", _engagement_mode_style(mode)),
-            )
-        else:
-            links = get_post_links(db, post.id)
-            first_link = links[0] if links else None
-            draft, metadata = generate_threads_shopee_content(
-                db,
-                ThreadsDraftRequest(
-                    keyword=post.keyword,
-                    product_name=post.product_name,
-                    affiliate_url=post.affiliate_url or (first_link.affiliate_url if first_link else ""),
-                    product_url=first_link.product_url if first_link else "",
-                    price=first_link.price if first_link else "",
-                    shop_name=first_link.shop_name if first_link else "",
-                    style="viral product-native",
-                ),
-            )
-        updated = update_draft_content(db, post_id, draft)
-        if post.status != "engagement":
-            updated = update_post_metadata(db, post_id, metadata) or updated
-        await update.message.reply_text(_preview(updated))
-        await _reply_status(update)
+            is_engagement_post = post.status == "engagement" or bool(meta.get("mode") or meta.get("persona"))
+
+            if is_engagement_post:
+                mode = meta.get("mode", "viral")
+                draft = generate_threads_engagement_draft(
+                    db,
+                    post.keyword,
+                    style=meta.get("style", _engagement_mode_style(mode)),
+                    persona=meta.get("persona", "daily"),
+                )
+                draft.cta = _metadata_cta(
+                    persona=meta.get("persona", "daily"),
+                    mode=mode,
+                    style=meta.get("style", _engagement_mode_style(mode)),
+                )
+                if post.status == "posted":
+                    updated = create_post(
+                        db,
+                        keyword=post.keyword,
+                        product_name=post.product_name,
+                        affiliate_url=None,
+                        draft=draft,
+                        status="engagement",
+                    )
+                    await update.message.reply_text(f"Post #{post_id} đã posted, mình tạo draft mới #{updated.id}.")
+                else:
+                    updated = update_draft_content(db, post_id, draft)
+            else:
+                links = get_post_links(db, post.id)
+                first_link = links[0] if links else None
+                draft, metadata = generate_threads_shopee_content(
+                    db,
+                    ThreadsDraftRequest(
+                        keyword=post.keyword,
+                        product_name=post.product_name,
+                        affiliate_url=post.affiliate_url or (first_link.affiliate_url if first_link else ""),
+                        product_url=first_link.product_url if first_link else "",
+                        price=first_link.price if first_link else "",
+                        shop_name=first_link.shop_name if first_link else "",
+                        style="viral product-native",
+                    ),
+                )
+                if post.status == "posted":
+                    if links:
+                        updated = create_group_post(
+                            db,
+                            keyword=post.keyword,
+                            product_name=post.product_name,
+                            draft=draft,
+                            links=_post_link_payloads(links),
+                            status="draft",
+                            metadata=metadata,
+                        )
+                    else:
+                        updated = create_post(
+                            db,
+                            keyword=post.keyword,
+                            product_name=post.product_name,
+                            affiliate_url=post.affiliate_url,
+                            draft=draft,
+                            status="draft" if post.affiliate_url else "needs_link",
+                            metadata=metadata,
+                        )
+                    await update.message.reply_text(f"Post #{post_id} đã posted, mình tạo draft mới #{updated.id}.")
+                else:
+                    updated = update_draft_content(db, post_id, draft)
+                    updated = update_post_metadata(db, post_id, metadata) or updated
+
+            if not updated:
+                await update.message.reply_text(f"Không update được post #{post_id}.")
+                return
+            await update.message.reply_text(_preview(updated))
+            await _reply_status(update)
+        except Exception as exc:
+            await update.message.reply_text(f"Regenerate bị lỗi: {exc}")
+            raise
 
 
 async def refreshdrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1131,7 +1293,7 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def post_to_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Dùng: /post <post_id>")
+        await update.message.reply_text("Dùng: /post <post_id> [account_name]")
         return
 
     try:
@@ -1155,10 +1317,20 @@ async def post_to_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(f"Post #{post_id} chưa có link Shopee. Dùng /addlink {post_id} <link> trước.")
             return
 
-        await update.message.reply_text("Đang đăng bài lên Threads...")
+        account_name = context.args[1].strip() if len(context.args) >= 2 else ""
+        try:
+            if account_name:
+                account = get_threads_account(account_name)
+            else:
+                account = select_account_for_post(_post_account_payload(post), load_threads_accounts())
+        except ThreadsAccountError as exc:
+            await update.message.reply_text(f"Chưa chọn được Threads account: {exc}")
+            return
+
+        await update.message.reply_text(f"Đang đăng bài lên Threads bằng account: {account['name']}...")
 
         try:
-            result = publish_threads_post(_thread_text(post))
+            result = publish_threads_post(_thread_text(post), account=account)
         except ThreadsPostingError as exc:
             await update.message.reply_text(f"Chưa đăng được Threads: {exc}")
             return
@@ -1171,7 +1343,7 @@ async def post_to_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             failed_replies: list[str] = []
             try:
                 for reply_text in _reply_link_texts(post):
-                    publish_threads_reply(threads_post_id, reply_text)
+                    publish_threads_reply(threads_post_id, reply_text, account=account)
                     reply_count += 1
                     time.sleep(2)
             except ThreadsPostingError as exc:
@@ -1183,11 +1355,16 @@ async def post_to_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_message = f"\nĐã gắn {reply_count} bình luận link."
 
         post.threads_post_id = threads_post_id
+        post.posted_account_name = account["name"]
+        post.posted_account_user_id = account["user_id"]
         post.status = "posted"
         db.commit()
         db.refresh(post)
 
-        await update.message.reply_text(f"Đã đăng Threads cho post #{post.id}.\nThreads ID: {post.threads_post_id or 'unknown'}{reply_message}")
+        await update.message.reply_text(
+            f"Đã đăng Threads cho post #{post.id} bằng {account['name']}.\n"
+            f"Threads ID: {post.threads_post_id or 'unknown'}{reply_message}"
+        )
         await _reply_status(update)
 
 
@@ -1211,11 +1388,17 @@ async def replylinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text(f"Post #{post_id} chưa có Threads ID. Hãy /post {post_id} trước.")
             return
 
+        try:
+            account = get_threads_account(post.posted_account_name) if post.posted_account_name else None
+        except ThreadsAccountError as exc:
+            await update.message.reply_text(f"Không lấy được account đã post bài này: {exc}")
+            return
+
         await update.message.reply_text("Đang gắn link vào bình luận...")
         reply_count = 0
         try:
             for reply_text in _reply_link_texts(post):
-                publish_threads_reply(post.threads_post_id, reply_text)
+                publish_threads_reply(post.threads_post_id, reply_text, account=account)
                 reply_count += 1
                 time.sleep(2)
         except ThreadsPostingError as exc:
@@ -1281,6 +1464,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("trends", trends))
     app.add_handler(CommandHandler("trenddrafts", trenddrafts))
     app.add_handler(CommandHandler("performance", performance))
+    app.add_handler(CommandHandler("ideas", ideas))
+    app.add_handler(CommandHandler("accounts", accounts))
     app.add_handler(CommandHandler("engagepost", engagepost))
     app.add_handler(CallbackQueryHandler(choose_engagement_persona, pattern=r"^engage_persona:(daily|controversial|advisor)$"))
     app.add_handler(CallbackQueryHandler(choose_engagement_mode, pattern=r"^engage_mode:(viral|advice|ask|quote|observation)$"))

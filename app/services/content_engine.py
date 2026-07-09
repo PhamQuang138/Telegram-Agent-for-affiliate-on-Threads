@@ -4,8 +4,12 @@ import json
 import random
 import re
 
+from app.services.angle_library import select_angle
+from app.services.content_diversity import build_diversity_key, should_reduce_repetition
 from app.services.content_quality import evaluate_content
 from app.services.content_similarity import is_too_similar
+from app.services.hook_library import choose_hook
+from app.services.persona_library import select_persona
 from app.services.product_scoring import score_products
 
 
@@ -20,16 +24,51 @@ def generate_affiliate_content(
     analytics_context = analytics_context or {}
     scored_products = score_products(products, keyword, analytics_context)
     selected = scored_products[: min(4, len(scored_products))]
+    primary_product = selected[0] if selected else {}
 
     need = _choose_need(keyword, selected)
-    persona = _choose_persona(keyword, selected, analytics_context)
-    angle = _choose_angle(keyword, selected, analytics_context)
-    hook_type = _choose_hook(keyword)
-    content = _compose_content(keyword, selected, need, persona, angle, hook_type)
+    persona_obj = select_persona(keyword, primary_product, analytics_context=analytics_context)
+    angle_obj = select_angle(keyword, primary_product, persona_obj, analytics_context)
+    hook_obj = choose_hook(_hook_type_for(keyword, persona_obj, angle_obj), avoid=previous_posts[:5])
+    persona = str(persona_obj.get("name") or _choose_persona(keyword, selected, analytics_context))
+    angle = str(angle_obj.get("name") or _choose_angle(keyword, selected, analytics_context))
+    hook_type = str(hook_obj.get("hook_type") or _choose_hook(keyword))
+    hook = str(hook_obj.get("hook") or "")
+    product_category = _product_category(keyword, selected)
+    diversity_key = build_diversity_key(
+        {
+            "persona_id": persona_obj.get("id"),
+            "angle_id": angle_obj.get("id"),
+            "hook_type": hook_type,
+            "product_category": product_category,
+        }
+    )
+    diversity = should_reduce_repetition(
+        {"diversity_key": diversity_key},
+        analytics_context.get("recent_posts", []) if isinstance(analytics_context, dict) else [],
+    )
+    if not diversity["passed"]:
+        angle_obj = _alternate_angle(keyword, primary_product, persona_obj, angle_obj, analytics_context)
+        angle = str(angle_obj.get("name") or angle)
+        hook_obj = choose_hook(None, avoid=[hook])
+        hook_type = str(hook_obj.get("hook_type") or hook_type)
+        hook = str(hook_obj.get("hook") or hook)
+        diversity_key = build_diversity_key(
+            {
+                "persona_id": persona_obj.get("id"),
+                "angle_id": angle_obj.get("id"),
+                "hook_type": hook_type,
+                "product_category": product_category,
+            }
+        )
+
+    content = _compose_content(keyword, selected, need, persona, angle, hook_type, hook)
 
     if is_too_similar(content, previous_posts):
-        hook_type = "question"
-        content = _compose_content(keyword, selected, need, persona, angle, hook_type)
+        hook_obj = choose_hook("question", avoid=[hook])
+        hook_type = str(hook_obj.get("hook_type") or "question")
+        hook = str(hook_obj.get("hook") or hook)
+        content = _compose_content(keyword, selected, need, persona, angle, hook_type, hook)
 
     quality = evaluate_content(
         content,
@@ -41,7 +80,12 @@ def generate_affiliate_content(
         "need": need,
         "persona": persona,
         "angle": angle,
+        "hook": hook,
+        "persona_id": persona_obj.get("id", ""),
+        "angle_id": angle_obj.get("id", ""),
         "hook_type": hook_type,
+        "content_type": "affiliate_threads",
+        "diversity_key": diversity_key,
         "content": content,
         "cta": "",
         "hashtags": _hashtags(keyword),
@@ -49,6 +93,31 @@ def generate_affiliate_content(
         "reasoning": f"{persona} gặp vấn đề '{need}', nên angle '{angle}' hợp để nhắc sản phẩm tự nhiên.",
         "selected_products": selected,
     }
+
+
+def generate_content_ideas(
+    keyword: str | None,
+    products: list[dict],
+    analytics_context: dict | None = None,
+    count: int = 3,
+) -> list[dict]:
+    ideas = []
+    previous: list[str] = []
+    for _index in range(count):
+        result = generate_affiliate_content(keyword, products, previous, analytics_context or {})
+        previous.append(result["content"])
+        ideas.append(
+            {
+                "keyword": keyword or "đồ tiện ích",
+                "need": result["need"],
+                "persona": result["persona"],
+                "angle": result["angle"],
+                "hook": result.get("hook") or "",
+                "idea": result["content"],
+                "selected_products": result["selected_products"][:2],
+            }
+        )
+    return ideas
 
 
 def prompt_payload(
@@ -59,13 +128,23 @@ def prompt_payload(
     target_platform: str = "threads",
 ) -> dict:
     local_plan = generate_affiliate_content(keyword, products, previous_posts, analytics_context, target_platform)
+    compact_products = [
+        {
+            "product_name": item.get("product_name") or item.get("name") or "",
+            "score_reason": item.get("score_reason") or "",
+            "possible_needs": (item.get("possible_needs") or [])[:2],
+            "possible_personas": (item.get("possible_personas") or [])[:2],
+            "possible_angles": (item.get("possible_angles") or [])[:2],
+        }
+        for item in local_plan["selected_products"][:3]
+    ]
     return {
         "keyword": keyword or "",
-        "products_json": json.dumps(local_plan["selected_products"], ensure_ascii=False),
+        "products_json": json.dumps(compact_products, ensure_ascii=False),
         "previous_posts": "\n---\n".join(previous_posts) or "None",
         "analytics_context": json.dumps(analytics_context or {}, ensure_ascii=False),
         "target_platform": target_platform,
-        "local_plan": local_plan,
+        "local_plan": {**local_plan, "selected_products": compact_products},
     }
 
 
@@ -117,6 +196,30 @@ def _choose_hook(keyword: str) -> str:
     return random.choice(["observation", "confession", "question", "tiny_drama"])
 
 
+def _hook_type_for(keyword: str, persona: dict, angle: dict) -> str:
+    text = " ".join([keyword.lower(), str(persona.get("id", "")), str(angle.get("id", ""))])
+    if any(word in text for word in ["văn phòng", "office", "laptop", "bàn"]):
+        return "office_life"
+    if any(word in text for word in ["sinh viên", "student", "học", "balo"]):
+        return "student_life"
+    if any(word in text for word in ["mùa", "seasonal", "nắng", "áo khoác", "noel"]):
+        return "seasonal"
+    if "wishlist" in text:
+        return "wishlist"
+    if "problem" in text:
+        return "problem"
+    return random.choice(["observation", "question", "confession", "funny", "minimalism"])
+
+
+def _alternate_angle(keyword: str, product: dict, persona: dict, current: dict, analytics_context: dict) -> dict:
+    from app.services.angle_library import load_angles
+
+    for angle in load_angles():
+        if angle.get("id") != current.get("id"):
+            return angle
+    return current
+
+
 def _compose_content(
     keyword: str,
     products: list[dict],
@@ -124,8 +227,10 @@ def _compose_content(
     persona: str,
     angle: str,
     hook_type: str,
+    hook: str = "",
 ) -> str:
     product_phrase = _product_phrase(products, keyword)
+    hook_prefix = hook.rstrip(". ")
     templates = {
         "question": [
             "Có ai cũng bị {need} không? {product_phrase} kiểu không làm đời đổi màu, nhưng đúng lúc thì đỡ cáu hẳn.",
@@ -149,23 +254,62 @@ def _compose_content(
         ],
     }
     template = random.choice(templates.get(hook_type, templates["observation"]))
-    return _clean(template.format(need=need, persona=persona, product_phrase=product_phrase))
+    body = template.format(need=need, persona=persona, product_phrase=product_phrase)
+    if hook_prefix and hook_prefix.lower() not in body[:80].lower():
+        body = f"{hook_prefix} {body}"
+    return _clean(body)
 
 
 def _product_phrase(products: list[dict], keyword: str) -> str:
     if not products:
         return f"một món liên quan tới {keyword}"
-    names = [_short_name(str(item.get("product_name") or item.get("name") or keyword)) for item in products[:2]]
+    categories = {_product_category(keyword, [item]) for item in products[:4]}
+    if len(products) > 1 and len(categories) > 1:
+        return _generic_product_phrase(keyword, products)
+    names = [
+        name
+        for name in (_short_name(str(item.get("product_name") or item.get("name") or keyword)) for item in products[:2])
+        if name
+    ]
+    if not names:
+        return _generic_product_phrase(keyword, products)
+    if any(_looks_like_catalog_name(name) for name in names):
+        return _generic_product_phrase(keyword, products)
     if len(names) == 1:
         return names[0]
     return f"{names[0]} hoặc {names[1]}"
 
 
 def _short_name(name: str) -> str:
+    name = re.sub(r"\[[^\]]+\]", " ", name)
+    name = re.sub(r"\([^)]*(?:sale|rẻ|freeship|mã|voucher|giảm|chính hãng|hot)[^)]*\)", " ", name, flags=re.I)
+    name = re.sub(r"\b(?:rẻ vô đối|sale|freeship|chính hãng|cao cấp|hot|giá rẻ|mã giảm|hàng mới|bán chạy)\b", " ", name, flags=re.I)
+    name = re.sub(r"\b(?:\d+\s*xương|\d+\s*chiều|uv|upf\s*\d+|size\s*\w+)\b", " ", name, flags=re.I)
     name = re.sub(r"\b\d+[kK]?\b", "", name)
     name = re.sub(r"\s+", " ", name).strip(" -,.")
     words = name.split()
     return " ".join(words[:8]) if len(words) > 8 else name
+
+
+def _looks_like_catalog_name(name: str) -> bool:
+    clean = name.lower()
+    return (
+        bool(re.search(r"\b(?:icon|mã|uv|xương|chiều|rẻ|sale|freeship|chính hãng)\b", clean))
+        or len(clean.split()) >= 7
+    )
+
+
+def _generic_product_phrase(keyword: str, products: list[dict]) -> str:
+    category = _product_category(keyword, products)
+    if category == "fashion":
+        return "vài món mặc hằng ngày"
+    if category == "workdesk":
+        return "vài món nhỏ cho góc làm việc"
+    if category == "seasonal_utility":
+        return "vài món đỡ khó chịu vì thời tiết"
+    if category == "student":
+        return "vài món nhỏ cho đi học/đi làm"
+    return "vài món nhỏ dùng hằng ngày"
 
 
 def _top_metric(analytics_context: dict, key: str) -> str:
@@ -173,6 +317,19 @@ def _top_metric(analytics_context: dict, key: str) -> str:
     if rows and isinstance(rows[0], dict):
         return str(rows[0].get("name") or rows[0].get("value") or "").strip()
     return ""
+
+
+def _product_category(keyword: str, products: list[dict]) -> str:
+    text = " ".join([keyword, " ".join(str(item.get("product_name", "")) for item in products)]).lower()
+    if any(word in text for word in ["áo", "quần", "giày", "outfit"]):
+        return "fashion"
+    if any(word in text for word in ["bàn", "laptop", "chuột", "đèn", "văn phòng"]):
+        return "workdesk"
+    if any(word in text for word in ["quạt", "nắng", "nóng"]):
+        return "seasonal_utility"
+    if any(word in text for word in ["balo", "học", "sinh viên"]):
+        return "student"
+    return "utility"
 
 
 def _hashtags(keyword: str) -> list[str]:

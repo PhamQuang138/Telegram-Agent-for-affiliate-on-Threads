@@ -63,8 +63,13 @@ def create_post(
         need=metadata.get("need"),
         persona=metadata.get("persona"),
         angle=metadata.get("angle"),
+        persona_id=metadata.get("persona_id"),
+        angle_id=metadata.get("angle_id"),
+        hook=metadata.get("hook"),
         hook_type=metadata.get("hook_type"),
         story_type=metadata.get("story_type"),
+        content_type=metadata.get("content_type"),
+        diversity_key=metadata.get("diversity_key"),
         target_platform=metadata.get("target_platform", "threads"),
     )
     db.add(post)
@@ -98,8 +103,13 @@ def create_group_post(
         need=metadata.get("need"),
         persona=metadata.get("persona"),
         angle=metadata.get("angle"),
+        persona_id=metadata.get("persona_id"),
+        angle_id=metadata.get("angle_id"),
+        hook=metadata.get("hook"),
         hook_type=metadata.get("hook_type"),
         story_type=metadata.get("story_type"),
+        content_type=metadata.get("content_type"),
+        diversity_key=metadata.get("diversity_key"),
         target_platform=metadata.get("target_platform", "threads"),
     )
     db.add(post)
@@ -305,8 +315,13 @@ def update_post_metadata(db: Session, post_id: int, metadata: dict) -> ThreadsPo
         "need",
         "persona",
         "angle",
+        "persona_id",
+        "angle_id",
+        "hook",
         "hook_type",
         "story_type",
+        "content_type",
+        "diversity_key",
         "target_platform",
         "impression_estimate",
         "performance_score",
@@ -420,6 +435,18 @@ def analytics_context(db: Session) -> dict:
         .order_by(ThreadsPost.id.desc())
         .limit(10)
     ).all()
+    recent_rows = db.execute(
+        select(
+            ThreadsPost.keyword,
+            ThreadsPost.persona_id,
+            ThreadsPost.angle_id,
+            ThreadsPost.hook_type,
+            ThreadsPost.diversity_key,
+        )
+        .where(ThreadsPost.status != "deleted")
+        .order_by(ThreadsPost.id.desc())
+        .limit(10)
+    ).all()
 
     return {
         "top_posts": [
@@ -433,6 +460,17 @@ def analytics_context(db: Session) -> dict:
         "personas": _performance_metric(db, ThreadsPost.persona),
         "angles": _performance_metric(db, ThreadsPost.angle),
         "hook_types": _performance_metric(db, ThreadsPost.hook_type),
+        "diversity_keys": _performance_metric(db, ThreadsPost.diversity_key),
+        "recent_posts": [
+            {
+                "keyword": str(row.keyword or ""),
+                "persona_id": str(row.persona_id or ""),
+                "angle_id": str(row.angle_id or ""),
+                "hook_type": str(row.hook_type or ""),
+                "diversity_key": str(row.diversity_key or ""),
+            }
+            for row in recent_rows
+        ],
     }
 
 
@@ -441,18 +479,48 @@ def performance_summary(db: Session) -> dict:
         "personas": _performance_metric(db, ThreadsPost.persona, limit=5),
         "angles": _performance_metric(db, ThreadsPost.angle, limit=5),
         "hook_types": _performance_metric(db, ThreadsPost.hook_type, limit=5),
+        "diversity_keys": _performance_metric(db, ThreadsPost.diversity_key, limit=5),
+        "bottom_personas": _performance_metric(db, ThreadsPost.persona, limit=5, ascending=True),
+        "bottom_angles": _performance_metric(db, ThreadsPost.angle, limit=5, ascending=True),
+        "bottom_hook_types": _performance_metric(db, ThreadsPost.hook_type, limit=5, ascending=True),
+        "keywords": _keyword_performance(db, limit=5),
+        "products": _product_performance(db, limit=5),
     }
 
 
-def _performance_metric(db: Session, column, limit: int = 5) -> list[dict]:
+def _performance_metric(db: Session, column, limit: int = 5, ascending: bool = False) -> list[dict]:
+    clicks = func.coalesce(func.sum(ThreadsPost.click_count), 0)
     rows = db.execute(
-        select(column.label("name"), func.count(ThreadsPost.id).label("posts"), func.coalesce(func.sum(ThreadsPost.click_count), 0).label("clicks"))
+        select(column.label("name"), func.count(ThreadsPost.id).label("posts"), clicks.label("clicks"))
         .where(column.is_not(None), column != "")
         .group_by(column)
-        .order_by(func.coalesce(func.sum(ThreadsPost.click_count), 0).desc(), func.count(ThreadsPost.id).desc())
+        .order_by(clicks.asc() if ascending else clicks.desc(), func.count(ThreadsPost.id).desc())
         .limit(limit)
     ).all()
     return [
         {"name": str(row.name), "posts": int(row.posts), "clicks": int(row.clicks or 0)}
         for row in rows
     ]
+
+
+def _keyword_performance(db: Session, limit: int = 5) -> list[dict]:
+    clicks = func.coalesce(func.sum(ThreadsPost.click_count), 0)
+    rows = db.execute(
+        select(ThreadsPost.keyword.label("name"), func.count(ThreadsPost.id).label("posts"), clicks.label("clicks"))
+        .where(ThreadsPost.keyword != "")
+        .group_by(ThreadsPost.keyword)
+        .order_by(clicks.desc(), func.count(ThreadsPost.id).desc())
+        .limit(limit)
+    ).all()
+    return [{"name": str(row.name), "posts": int(row.posts), "clicks": int(row.clicks or 0)} for row in rows]
+
+
+def _product_performance(db: Session, limit: int = 5) -> list[dict]:
+    rows = db.execute(
+        select(ThreadsPostLink.product_name.label("name"), func.count(ClickLog.id).label("clicks"))
+        .join(ClickLog, ClickLog.slug == ThreadsPostLink.slug)
+        .group_by(ThreadsPostLink.product_name)
+        .order_by(func.count(ClickLog.id).desc())
+        .limit(limit)
+    ).all()
+    return [{"name": str(row.name), "posts": 0, "clicks": int(row.clicks or 0)} for row in rows]

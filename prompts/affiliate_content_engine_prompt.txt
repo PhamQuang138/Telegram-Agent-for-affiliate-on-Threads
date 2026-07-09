@@ -5,7 +5,7 @@ Write a short social post that feels like a real Vietnamese person posting, not 
 INPUT
 
 Keyword: {keyword}
-Products JSON: {products_json}
+Top products JSON: {products_json}
 Previous posts: {previous_posts}
 Analytics context JSON: {analytics_context}
 Target platform: {target_platform}
@@ -38,14 +38,21 @@ REQUIREMENTS
 OUTPUT JSON ONLY
 
 {
-  "need": "...",
-  "persona": "...",
-  "angle": "...",
-  "hook_type": "...",
   "content": "...",
   "cta": "",
   "hashtags": [],
   "quality_score": 0,
+  "hook": "...",
+  "persona_id": "...",
+  "angle_id": "...",
+  "content_type": "affiliate_threads",
+  "diversity_key": "...",
+  "need": "...",
+  "persona": "...",
+  "angle": "...",
+  "hook_type": "...",
   "reasoning": "...",
   "selected_products": []
 }
+
+Put the final post in "content" first. Never omit "content".

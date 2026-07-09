@@ -16,6 +16,8 @@ python -m app.main
 - [Telegram Commands](#telegram-commands)
 - [AI Affiliate Content Engine](#ai-affiliate-content-engine)
 - [Trend Collection Engine](#trend-collection-engine)
+- [Content Libraries](#content-libraries)
+- [Diversity And Topic Memory](#diversity-and-topic-memory)
 - [Shopee Draft Generation](#shopee-draft-generation)
 - [Engagement Posts](#engagement-posts)
 - [AI Provider Rotation](#ai-provider-rotation)
@@ -65,6 +67,19 @@ PORT=8000
 THREADS_ACCESS_TOKEN=
 THREADS_USER_ID=
 THREADS_API_BASE_URL=https://graph.threads.net/v1.0
+
+# Optional multi-account mode
+# THREADS_ACCOUNTS=acc1,acc2
+# THREADS_ACC1_NAME=Main account
+# THREADS_ACC1_USER_ID=
+# THREADS_ACC1_ACCESS_TOKEN=
+# THREADS_ACC1_PERSONA=office_minimal
+# THREADS_ACC1_TOPICS=đồ văn phòng,bàn làm việc,đồ tiện ích
+# THREADS_ACC2_NAME=Second account
+# THREADS_ACC2_USER_ID=
+# THREADS_ACC2_ACCESS_TOKEN=
+# THREADS_ACC2_PERSONA=style_basic
+# THREADS_ACC2_TOPICS=outfit basic,áo khoác,thời trang
 
 INCLUDE_TRACKING_LINK_IN_THREADS=false
 POST_TRACKING_LINK_AS_REPLY=true
@@ -125,6 +140,8 @@ Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage
 /trenddrafts [limit]
 /trenddrafts <keyword>
 /performance
+/ideas [keyword]
+/accounts
 
 /importcsv <csv_path> [group_size]
 /updatelink <csv_path> [group_size]
@@ -141,7 +158,7 @@ Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage
 
 /addlink <post_id> <shopee_affiliate_link>
 /approve <post_id>
-/post <post_id>
+/post <post_id> [account_name]
 /replylinks <post_id>
 /delete <post_id>
 /analytics
@@ -171,6 +188,9 @@ app/services/content_engine.py
 app/services/product_scoring.py
 app/services/content_quality.py
 app/services/content_similarity.py
+app/services/hook_library.py
+app/services/persona_library.py
+app/services/angle_library.py
 prompts/affiliate_content_engine_prompt.txt
 ```
 
@@ -212,6 +232,7 @@ Safe local sources currently used:
 - Click history from tracked links.
 - Season/calendar keywords.
 - Manual seed keywords from `data/seed_keywords.txt`.
+- Google Suggest suggestions from safe seed keywords.
 
 Optional providers are stubbed safely:
 
@@ -234,6 +255,48 @@ Generate drafts from trends:
 ```
 
 Trend snapshots are cached in SQLite table `trend_snapshots` with a default 6-hour TTL so external sources are not called too often when they are enabled later.
+
+## Content Libraries
+
+The content engine now uses small editable JSON libraries:
+
+```text
+data/hooks.json
+data/personas.json
+data/angles.json
+```
+
+Hooks are grouped by type, such as `observation`, `question`, `confession`, `office_life`, `student_life`, `funny`, `problem`, `wishlist`, `minimalism`, and `seasonal`.
+
+Personas and angles are selected from keyword, product signals, trend context, and click history. If the JSON files are missing or invalid, the bot falls back to built-in defaults.
+
+Generate ideas without creating a draft:
+
+```text
+/ideas
+/ideas quạt mini
+```
+
+The response includes suggested need, persona, angle, hook, short post ideas, and matching catalog products if available.
+
+## Diversity And Topic Memory
+
+The bot stores content metadata to avoid repeating the same formula too often:
+
+```text
+persona_id
+angle_id
+hook
+hook_type
+content_type
+diversity_key
+```
+
+`app/services/content_diversity.py` builds a diversity key from persona, angle, hook type, and product category. If recent posts repeat the same key too much, the content engine tries another angle or hook.
+
+`app/services/topic_memory.py` records recently used keywords and product IDs in SQLite table `topic_memory`. `/trenddrafts` skips keywords used recently when it can. If you force `/contentdraft <keyword>`, it still creates the draft, but the engine has enough context to vary the angle.
+
+`/performance` now also includes top keywords, products, diversity keys, bottom persona/angle/hook groups, and a short rule-based suggestion.
 
 ## Basic Workflow
 
@@ -469,9 +532,18 @@ Post a draft:
 
 ```text
 /post <post_id>
+/post <post_id> acc1
 ```
 
 By default, the main Threads post does not include the affiliate link. The bot posts one bundled reply/comment containing 3-4 links when grouped links exist.
+
+Multi-account posting is optional. If `THREADS_ACCOUNTS` is not set, `/post` uses the legacy `THREADS_ACCESS_TOKEN` and `THREADS_USER_ID`. If accounts are configured, `/post <post_id>` chooses a matching account from persona/topic signals and round-robin fallback. `/post <post_id> <account_name>` forces a specific account.
+
+Show configured accounts:
+
+```text
+/accounts
+```
 
 Link settings:
 
@@ -517,6 +589,11 @@ app/services/product_scoring.py
 app/services/content_quality.py
 app/services/content_similarity.py
 app/services/trend_service.py
+app/services/hook_library.py
+app/services/persona_library.py
+app/services/angle_library.py
+app/services/content_diversity.py
+app/services/topic_memory.py
 prompts/threads_shopee_prompt.txt
 prompts/threads_engagement_prompt.txt
 prompts/affiliate_content_engine_prompt.txt
@@ -533,7 +610,7 @@ Run the offline test suite:
 python -m pytest
 ```
 
-Tests cover product scoring, content quality, duplicate detection, content-engine fallback, and idempotent SQLite migration.
+Tests cover product scoring, content quality, duplicate detection, library selection, diversity checks, content ideas, Google Suggest mocking, content-engine fallback, and idempotent SQLite migration.
 
 ## Repository Hygiene
 

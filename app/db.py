@@ -25,6 +25,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     if get_settings().database_url.startswith("sqlite"):
         _migrate_threads_posts_columns()
+        _migrate_topic_memory_table()
         _allow_duplicate_post_link_affiliate_urls()
 
 
@@ -33,12 +34,19 @@ def _migrate_threads_posts_columns() -> None:
         "need": "TEXT",
         "persona": "VARCHAR(255)",
         "angle": "TEXT",
+        "persona_id": "VARCHAR(128)",
+        "angle_id": "VARCHAR(128)",
+        "hook": "TEXT",
         "hook_type": "VARCHAR(255)",
         "story_type": "VARCHAR(255)",
+        "content_type": "VARCHAR(128)",
+        "diversity_key": "VARCHAR(255)",
         "target_platform": "VARCHAR(64)",
         "click_count": "INTEGER NOT NULL DEFAULT 0",
         "impression_estimate": "INTEGER",
         "performance_score": "FLOAT",
+        "posted_account_name": "VARCHAR(128)",
+        "posted_account_user_id": "VARCHAR(255)",
     }
     with engine.begin() as connection:
         existing = {
@@ -48,6 +56,30 @@ def _migrate_threads_posts_columns() -> None:
         for column, column_type in columns.items():
             if column not in existing:
                 connection.exec_driver_sql(f"ALTER TABLE threads_posts ADD COLUMN {column} {column_type}")
+
+
+def _migrate_topic_memory_table() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS topic_memory (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                keyword VARCHAR(255) NOT NULL,
+                product_ids_json TEXT NOT NULL DEFAULT '[]',
+                post_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_topic_memory_keyword ON topic_memory (keyword)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_topic_memory_post_id ON topic_memory (post_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_topic_memory_created_at ON topic_memory (created_at)"
+        )
 
 
 def _allow_duplicate_post_link_affiliate_urls() -> None:
