@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ClickLog, ThreadsPost, ThreadsPostLink
+from app.models import ClickLog, ThreadsPost, ThreadsPostLink, ThreadsPostMetric, ThreadsReply
 from app.schemas import AnalyticsSummary, AnalyticsTopPost, ThreadsDraft
 
 
@@ -69,6 +69,7 @@ def create_post(
         hook_type=metadata.get("hook_type"),
         story_type=metadata.get("story_type"),
         content_type=metadata.get("content_type"),
+        content_goal=metadata.get("content_goal"),
         diversity_key=metadata.get("diversity_key"),
         target_platform=metadata.get("target_platform", "threads"),
     )
@@ -109,6 +110,7 @@ def create_group_post(
         hook_type=metadata.get("hook_type"),
         story_type=metadata.get("story_type"),
         content_type=metadata.get("content_type"),
+        content_goal=metadata.get("content_goal"),
         diversity_key=metadata.get("diversity_key"),
         target_platform=metadata.get("target_platform", "threads"),
     )
@@ -332,6 +334,7 @@ def update_post_metadata(db: Session, post_id: int, metadata: dict) -> ThreadsPo
         "hook_type",
         "story_type",
         "content_type",
+        "content_goal",
         "diversity_key",
         "target_platform",
         "impression_estimate",
@@ -486,7 +489,41 @@ def analytics_context(db: Session) -> dict:
 
 
 def performance_summary(db: Session) -> dict:
+    metric_rows = list(db.scalars(select(ThreadsPostMetric)))
+    total_views = sum(int(row.views or 0) for row in metric_rows)
+    total_replies = sum(int(row.replies or 0) for row in metric_rows)
+    total_clicks = sum(int(row.click_count or 0) for row in metric_rows)
+    ctr_values = [float(row.affiliate_ctr) for row in metric_rows if row.affiliate_ctr is not None]
+    engagement_values = [float(row.engagement_rate) for row in metric_rows if row.engagement_rate is not None]
+    account_rows = db.execute(
+        select(
+            ThreadsPostMetric.account_name.label("account_name"),
+            func.count(ThreadsPostMetric.id).label("sample_size"),
+            func.coalesce(func.sum(ThreadsPostMetric.views), 0).label("views"),
+            func.coalesce(func.avg(ThreadsPostMetric.performance_score), 0).label("performance"),
+        )
+        .group_by(ThreadsPostMetric.account_name)
+        .order_by(func.coalesce(func.avg(ThreadsPostMetric.performance_score), 0).desc())
+    ).all()
     return {
+        "threads": {
+            "synchronized_posts": len(metric_rows),
+            "total_views": total_views,
+            "total_replies": total_replies,
+            "total_affiliate_clicks": total_clicks,
+            "average_affiliate_ctr": round(sum(ctr_values) / len(ctr_values), 6) if ctr_values else None,
+            "average_engagement_rate": round(sum(engagement_values) / len(engagement_values), 6) if engagement_values else None,
+            "stored_replies": int(db.scalar(select(func.count(ThreadsReply.id))) or 0),
+            "accounts": [
+                {
+                    "account_name": str(row.account_name),
+                    "sample_size": int(row.sample_size or 0),
+                    "views": int(row.views or 0),
+                    "performance": round(float(row.performance or 0), 3),
+                }
+                for row in account_rows
+            ],
+        },
         "personas": _performance_metric(db, ThreadsPost.persona, limit=5),
         "angles": _performance_metric(db, ThreadsPost.angle, limit=5),
         "hook_types": _performance_metric(db, ThreadsPost.hook_type, limit=5),

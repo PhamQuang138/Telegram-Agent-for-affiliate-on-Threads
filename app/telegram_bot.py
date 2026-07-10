@@ -18,7 +18,7 @@ from agents.threads_shopee_agent import (
 )
 from app.config import get_settings
 from app.db import SessionLocal, init_db
-from app.models import ThreadsPost
+from app.models import ThreadsDemandOpportunity, ThreadsPost, ThreadsPostMetric, ThreadsReply
 from app.schemas import ThreadsDraftRequest
 from app.services.shopee_csv_importer import import_shopee_csv, scan_shopee_csv
 from app.services.content_engine import generate_content_ideas
@@ -54,13 +54,37 @@ from app.services.threads_account_service import (
 )
 from app.services.learning_engine import (
     SETTING_AUTO_LEARNING,
+    build_account_learning_profile,
     learning_status,
     maybe_run_auto_learning,
     set_app_setting,
+    update_account_learning_profile,
     update_learned_weights,
 )
-from app.services.trend_service import get_trending_keywords
+from app.services.reply_suggestion_service import build_reply_suggestion
+from app.services.threads_api_client import delete_thread_post, get_mentions
+from app.services.threads_insights_service import (
+    sync_account_insights,
+    sync_all_accounts_insights,
+    sync_post_insights,
+    thread_stats,
+)
+from app.services.threads_reply_service import sync_account_replies, sync_post_replies
+from app.services.threads_sync_service import sync_account_posts, sync_all_accounts_posts
+from app.services.trend_service import collect_threads_keyword_snapshot, get_trending_keywords
 from app.services.topic_memory import is_topic_recently_used, record_topic_usage
+from app.services.threads_demand_scanner import (
+    approve_batch as approve_buy_batch_service,
+    approve_opportunity,
+    build_scan_keywords,
+    edit_opportunity_comment,
+    get_opportunity as get_buy_opportunity,
+    list_opportunities,
+    reply_batch as reply_buy_batch_service,
+    reply_opportunity,
+    scan_threads_demand,
+    skip_opportunity,
+)
 
 PENDING_UPDATES: dict[int, tuple[str, int]] = {}
 PENDING_ENGAGEMENT_POSTS: dict[int, dict[str, str]] = {}
@@ -139,6 +163,8 @@ def _post_account_payload(post: ThreadsPost) -> dict:
         "persona": post.persona,
         "persona_id": post.persona_id,
         "angle": post.angle,
+        "content_type": post.content_type,
+        "content_goal": post.content_goal,
         "content": post.content,
     }
 
@@ -485,6 +511,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 /autolearn on|off
 /ideas [keyword]
 /accounts
+/syncposts [account_name]
+/syncinsights [account_name]
+/syncreplies [account_name]
+/threadstats <post_id>
+/accountperformance <account_name>
+/threadtrends <keyword>
+/mentions [account_name]
+/replysuggestions <post_id>
+/scanthreads [keyword] [account_name]
+/buyops [limit]
+/buyop <id>
+/approvebuy <id>
+/approvebuybatch <id1,id2,id3>
+/editbuy <id> <comment mới>
+/skipbuy <id>
+/replybuy <id> [account_name]
+/replybuybatch <id1,id2,id3> [account_name]
 /engagepost <topic>
 /view <post_id>
 /regenerate <post_id>
@@ -494,6 +537,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 /approve <post_id>
 /post <post_id> [account_name]
 /replylinks <post_id>
+/delete_thread <post_id> confirm
 /delete <post_id>
 /analytics"""
     )
@@ -823,6 +867,7 @@ async def choose_engagement_links(update: Update, context: ContextTypes.DEFAULT_
                 draft=draft,
                 links=_post_link_payloads(selected_links),
                 status="engagement",
+                metadata={"content_type": "engagement", "content_goal": "engagement", "persona": persona_name, "hook_type": mode},
             )
         else:
             post = create_post(
@@ -832,6 +877,7 @@ async def choose_engagement_links(update: Update, context: ContextTypes.DEFAULT_
                 affiliate_url=None,
                 draft=draft,
                 status="engagement",
+                metadata={"content_type": "engagement", "content_goal": "engagement", "persona": persona_name, "hook_type": mode},
             )
         await query.message.reply_text(_preview(post))
         if selected_links:
@@ -1008,6 +1054,14 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(
         "\n\n".join(
             [
+                "Threads synced metrics:\n"
+                f"- synchronized posts: {summary['threads']['synchronized_posts']}\n"
+                f"- total views: {summary['threads']['total_views']}\n"
+                f"- total replies: {summary['threads']['total_replies']}\n"
+                f"- affiliate clicks: {summary['threads']['total_affiliate_clicks']}\n"
+                f"- avg CTR: {_pct(summary['threads']['average_affiliate_ctr'])}\n"
+                f"- avg engagement: {_pct(summary['threads']['average_engagement_rate'])}\n"
+                f"- stored replies: {summary['threads']['stored_replies']}",
                 rows_text("Persona", summary["personas"]),
                 rows_text("Angle", summary["angles"]),
                 rows_text("Hook type", summary["hook_types"]),
@@ -1260,10 +1314,26 @@ async def regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                         affiliate_url=None,
                         draft=draft,
                         status="engagement",
+                        metadata={
+                            "content_type": "engagement",
+                            "content_goal": "engagement",
+                            "persona": _engagement_persona_name(meta.get("persona", "daily")).lower(),
+                            "hook_type": mode,
+                        },
                     )
                     await update.message.reply_text(f"Post #{post_id} đã posted, mình tạo draft mới #{updated.id}.")
                 else:
                     updated = update_draft_content(db, post_id, draft)
+                    updated = update_post_metadata(
+                        db,
+                        post_id,
+                        {
+                            "content_type": "engagement",
+                            "content_goal": "engagement",
+                            "persona": _engagement_persona_name(meta.get("persona", "daily")).lower(),
+                            "hook_type": mode,
+                        },
+                    ) or updated
             else:
                 links = get_post_links(db, post.id)
                 first_link = links[0] if links else None
@@ -1546,6 +1616,440 @@ Top 5 bài nhiều click nhất:
     )
 
 
+async def syncposts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    account_name = context.args[0].strip() if context.args else ""
+    await update.message.reply_text("Đang đồng bộ bài Threads...")
+    try:
+        result = sync_account_posts(account_name, limit=50) if account_name else sync_all_accounts_posts(limit_per_account=50)
+    except ThreadsAccountError as exc:
+        await update.message.reply_text(f"Không sync được: {exc}")
+        return
+    await update.message.reply_text(_sync_result_text("Sync posts", result))
+
+
+async def syncinsights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    account_name = context.args[0].strip() if context.args else ""
+    await update.message.reply_text("Đang đồng bộ insights Threads...")
+    try:
+        result = sync_account_insights(account_name, limit=50) if account_name else sync_all_accounts_insights(limit_per_account=50)
+    except ThreadsAccountError as exc:
+        await update.message.reply_text(f"Không sync được: {exc}")
+        return
+    await update.message.reply_text(_sync_result_text("Sync insights", result))
+
+
+async def syncreplies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    account_name = context.args[0].strip() if context.args else ""
+    await update.message.reply_text("Đang đồng bộ replies Threads...")
+    results = []
+    try:
+        accounts_list = [get_threads_account(account_name)] if account_name else [acc for acc in load_threads_accounts() if acc.get("enabled")]
+        for account in accounts_list:
+            results.append(sync_account_replies(account["name"], limit_posts=30))
+    except ThreadsAccountError as exc:
+        await update.message.reply_text(f"Không sync được: {exc}")
+        return
+    await update.message.reply_text(_sync_result_text("Sync replies", {"accounts": results}))
+
+
+async def threadstats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dùng: /threadstats <post_id>")
+        return
+    try:
+        post_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("post_id phải là số.")
+        return
+    stats = thread_stats(post_id)
+    if not stats:
+        await update.message.reply_text(f"Chưa có stats cho post #{post_id}. Có thể chạy /syncinsights trước.")
+        return
+    await update.message.reply_text(
+        "\n".join(
+            [
+                f"Thread stats #{post_id}:",
+                f"- Threads ID: {stats.get('threads_media_id') or 'chưa có'}",
+                f"- account: {stats.get('account_name') or 'chưa rõ'}",
+                f"- views: {stats.get('views', 0)}",
+                f"- likes: {stats.get('likes', 0)}",
+                f"- replies: {stats.get('replies', 0)}",
+                f"- reposts: {stats.get('reposts', 0)}",
+                f"- quotes: {stats.get('quotes', 0)}",
+                f"- clicks: {stats.get('click_count', 0)}",
+                f"- affiliate CTR: {_pct(stats.get('affiliate_ctr'))}",
+                f"- engagement rate: {_pct(stats.get('engagement_rate'))}",
+                f"- purchase intent: {_score(stats.get('purchase_intent_score'))}",
+                f"- performance: {_score(stats.get('performance_score'))}",
+            ]
+        )
+    )
+
+
+async def accountperformance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    account_name = context.args[0].strip() if context.args else ""
+    if not account_name:
+        await update.message.reply_text("Dùng: /accountperformance <account_name>")
+        return
+    profile = update_account_learning_profile(account_name, min_posts=get_settings().threads_learning_min_posts, lookback_days=get_settings().threads_insights_lookback_days)
+    await update.message.reply_text(
+        "\n".join(
+            [
+                f"Account performance: {account_name}",
+                f"- enough_data: {profile.get('enough_data')}",
+                f"- sample size: {profile.get('sample_size')}",
+                f"- best reach: {_leader(profile.get('best_for_reach'))}",
+                f"- best engagement: {_leader(profile.get('best_for_engagement'))}",
+                f"- best affiliate: {_leader(profile.get('best_for_affiliate'))}",
+                f"- persona weights: {_weights_line((profile.get('weights') or {}).get('personas', {}))}",
+                f"- angle weights: {_weights_line((profile.get('weights') or {}).get('angles', {}))}",
+                f"- hook weights: {_weights_line((profile.get('weights') or {}).get('hook_types', {}))}",
+            ]
+        )
+    )
+
+
+async def threadtrends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyword = " ".join(context.args).strip()
+    if not keyword:
+        await update.message.reply_text("Dùng: /threadtrends <keyword>")
+        return
+    account = next((acc for acc in load_threads_accounts() if acc.get("enabled")), None)
+    if not account:
+        await update.message.reply_text("Chưa có Threads account hợp lệ để gọi keyword search.")
+        return
+    with _db() as db:
+        snapshot = collect_threads_keyword_snapshot(account, keyword, limit=50, db=db)
+    if not snapshot:
+        await update.message.reply_text("Chưa lấy được Threads keyword signal. Có thể token chưa có quyền hoặc THREADS_KEYWORD_SEARCH_ENABLED=false.")
+        return
+    await update.message.reply_text(
+        "\n".join(
+            [
+                f"Threads trend: {snapshot['keyword']}",
+                f"- score: {snapshot['score']}/100",
+                f"- results: {snapshot['result_count']} ({snapshot['recent_result_count']} gần đây)",
+                f"- related: {', '.join(snapshot['related_topics']) or 'chưa rõ'}",
+                f"- intents: {', '.join(snapshot['common_intents']) or 'chưa rõ'}",
+                f"- tone: {snapshot['tone_summary']}",
+                f"- reason: {snapshot['reason']}",
+            ]
+        )
+    )
+
+
+async def mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    account_name = context.args[0].strip() if context.args else ""
+    try:
+        account = get_threads_account(account_name or None)
+        rows = get_mentions(account, limit=10)
+    except ThreadsAccountError as exc:
+        await update.message.reply_text(f"Không lấy được account: {exc}")
+        return
+    if not rows:
+        await update.message.reply_text("Chưa có mentions hoặc token chưa có quyền threads_manage_mentions.")
+        return
+    await update.message.reply_text(
+        "Mentions gần đây:\n"
+        + "\n".join(f"- {str(row.get('username') or 'unknown')}: {str(row.get('text') or '')[:120]}" for row in rows[:10])
+    )
+
+
+async def replysuggestions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dùng: /replysuggestions <post_id>")
+        return
+    try:
+        post_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("post_id phải là số.")
+        return
+    with _db() as db:
+        post = get_post(db, post_id)
+        if not post:
+            await update.message.reply_text(f"Không tìm thấy post #{post_id}.")
+            return
+        replies = list(
+            db.scalars(
+                select(ThreadsReply)
+                .where(ThreadsReply.post_id == post_id, ThreadsReply.is_spam == 0)
+                .order_by(ThreadsReply.synced_at.desc())
+                .limit(20)
+            )
+        )
+        post_payload = {"has_links": _has_any_tracking_link(db, post)}
+        suggestions = []
+        for reply in replies:
+            suggestion = build_reply_suggestion(
+                {
+                    "intent": reply.intent,
+                    "asks_for_link": bool(reply.asks_for_link),
+                    "asks_for_price": bool(reply.asks_for_price),
+                    "product_interest": bool(reply.product_interest),
+                    "is_spam": bool(reply.is_spam),
+                },
+                post_payload,
+            )
+            if suggestion["should_reply"]:
+                suggestions.append((reply, suggestion))
+    if not suggestions:
+        await update.message.reply_text("Chưa có reply nào cần gợi ý phản hồi. Chạy /syncreplies trước nếu cần.")
+        return
+    await update.message.reply_text(
+        "Reply suggestions (chỉ gợi ý, không tự gửi):\n\n"
+        + "\n\n".join(
+            f"- @{reply.reply_username or 'unknown'}: {reply.reply_text[:120]}\n"
+            f"  Gợi ý: {suggestion['reply_text']}\n"
+            f"  Lý do: {suggestion['reason']}"
+            for reply, suggestion in suggestions[:8]
+        )
+    )
+
+
+async def delete_thread(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2 or context.args[1].lower() != "confirm":
+        await update.message.reply_text("Dùng: /delete_thread <post_id> confirm")
+        return
+    try:
+        post_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("post_id phải là số.")
+        return
+    with _db() as db:
+        post = get_post(db, post_id)
+        if not post or not post.threads_post_id:
+            await update.message.reply_text(f"Post #{post_id} chưa có Threads ID.")
+            return
+        try:
+            account = get_threads_account(post.posted_account_name) if post.posted_account_name else get_threads_account(None)
+        except ThreadsAccountError as exc:
+            await update.message.reply_text(f"Không lấy được account: {exc}")
+            return
+        ok = delete_thread_post(account, post.threads_post_id)
+        if ok:
+            post.status = "deleted"
+            db.commit()
+        await update.message.reply_text("Đã gửi lệnh xóa Threads." if ok else "Chưa xóa được, có thể token thiếu quyền threads_delete.")
+
+
+async def scanthreads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not get_settings().threads_demand_scanner_enabled:
+        await update.message.reply_text("Demand scanner đang tắt. Bật THREADS_DEMAND_SCANNER_ENABLED=true trong .env trước.")
+        return
+    args = context.args
+    account_name = ""
+    manual_keyword = " ".join(args).strip()
+    if args and len(args) >= 2:
+        maybe_account = args[-1].strip()
+        account_names = {account["name"] for account in load_threads_accounts()}
+        if maybe_account in account_names:
+            account_name = maybe_account
+            manual_keyword = " ".join(args[:-1]).strip()
+    if not account_name:
+        account = next((acc for acc in load_threads_accounts() if acc.get("enabled")), None)
+        if not account:
+            await update.message.reply_text("Chưa có Threads account hợp lệ.")
+            return
+        account_name = account["name"]
+    keywords = build_scan_keywords(manual_keyword or None, limit=8 if manual_keyword else 10)
+    await update.message.reply_text(f"Đang quét {len(keywords)} keyword bằng account {account_name}...")
+    result = scan_threads_demand(
+        account_name,
+        keywords,
+        limit_per_keyword=20,
+        max_opportunities=get_settings().threads_demand_max_results_per_scan,
+    )
+    await update.message.reply_text(
+        "Scan Threads xong.\n"
+        f"- keywords: {len(result['keywords_scanned'])}\n"
+        f"- posts fetched: {result['posts_fetched']}\n"
+        f"- opportunities: {result['opportunities_created']}\n"
+        f"- duplicates skipped: {result['duplicates_skipped']}\n"
+        f"- low intent skipped: {result['low_intent_skipped']}\n"
+        f"- errors: {'; '.join(result['errors'][:3]) if result['errors'] else 'không có'}"
+    )
+
+
+async def buyops(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    limit = 5
+    if context.args and context.args[0].isdigit():
+        limit = max(1, min(10, int(context.args[0])))
+    rows = list_opportunities(limit=limit)
+    if not rows:
+        await update.message.reply_text("Chưa có buy opportunity mới. Chạy /scanthreads trước.")
+        return
+    await update.message.reply_text("\n\n".join(_buyop_text(row, full=False) for row in rows))
+
+
+async def buyop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dùng: /buyop <id>")
+        return
+    opp = get_buy_opportunity(int(context.args[0]))
+    if not opp:
+        await update.message.reply_text("Không tìm thấy opportunity.")
+        return
+    await update.message.reply_text(_buyop_text(opp, full=True))
+
+
+async def approvebuy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dùng: /approvebuy <id>")
+        return
+    ok, message = approve_opportunity(int(context.args[0]))
+    await update.message.reply_text(f"{'Đã approve' if ok else 'Chưa approve được'}: {message}")
+
+
+async def approvebuybatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dùng: /approvebuybatch <id1,id2,id3>")
+        return
+    ids = _parse_ids(context.args[0])
+    if not ids:
+        await update.message.reply_text("Không đọc được ID.")
+        return
+    result = approve_buy_batch_service(ids)
+    await update.message.reply_text(
+        f"Approved: {', '.join(map(str, result['approved'])) or 'không có'}\n"
+        f"Giới hạn batch: {result['max_batch']}"
+    )
+
+
+async def skipbuy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dùng: /skipbuy <id>")
+        return
+    ok, message = skip_opportunity(int(context.args[0]))
+    await update.message.reply_text(f"{'Đã skip' if ok else 'Chưa skip được'}: {message}")
+
+
+async def editbuy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2 or not context.args[0].isdigit():
+        await update.message.reply_text("Dùng: /editbuy <id> <comment mới>")
+        return
+    comment = " ".join(context.args[1:]).strip()
+    ok, message = edit_opportunity_comment(int(context.args[0]), comment)
+    await update.message.reply_text(f"{'Đã sửa comment' if ok else 'Chưa sửa được'}: {message}")
+
+
+async def replybuy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dùng: /replybuy <id> [account_name]")
+        return
+    account_name = context.args[1].strip() if len(context.args) >= 2 else None
+    await update.message.reply_text("Đang reply opportunity đã approve...")
+    ok, message = reply_opportunity(int(context.args[0]), account_name)
+    await update.message.reply_text(f"{'Đã reply' if ok else 'Chưa reply được'}: {message}")
+
+
+async def replybuybatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dùng: /replybuybatch <id1,id2,id3> [account_name]")
+        return
+    ids = _parse_ids(context.args[0])
+    if not ids:
+        await update.message.reply_text("Không đọc được ID.")
+        return
+    account_name = context.args[1].strip() if len(context.args) >= 2 else None
+    await update.message.reply_text("Đang reply batch đã approve...")
+    result = reply_buy_batch_service(ids, account_name)
+    await update.message.reply_text(
+        "\n".join(
+            f"- #{row['id']}: {'ok' if row['ok'] else 'fail'} - {row['message']}"
+            for row in result["results"]
+        )
+    )
+
+
+def _sync_result_text(title: str, result: dict) -> str:
+    if "accounts" in result:
+        rows = [title + ":"]
+        for item in result.get("accounts", []):
+            rows.append(
+                "- "
+                + item.get("account_name", "unknown")
+                + ": "
+                + ", ".join(f"{key}={value}" for key, value in item.items() if key not in {"account_name", "errors"} and not isinstance(value, list))
+            )
+            if item.get("errors"):
+                rows.append("  errors: " + "; ".join(item["errors"][:3]))
+        return "\n".join(rows)
+    rows = [title + ":", "- " + ", ".join(f"{key}={value}" for key, value in result.items() if key != "errors" and not isinstance(value, list))]
+    if result.get("errors"):
+        rows.append("errors: " + "; ".join(result["errors"][:3]))
+    return "\n".join(rows)
+
+
+def _pct(value: object) -> str:
+    if value is None:
+        return "chưa có"
+    return f"{float(value) * 100:.2f}%"
+
+
+def _score(value: object) -> str:
+    if value is None:
+        return "chưa có"
+    return f"{float(value):.1f}/100"
+
+
+def _leader(value: object) -> str:
+    if not isinstance(value, dict) or not value:
+        return "chưa có"
+    return f"{value.get('name')} ({value.get('score')})"
+
+
+def _weights_line(weights: dict) -> str:
+    if not weights:
+        return "chưa có"
+    return ", ".join(f"{key}: {value}" for key, value in list(sorted(weights.items(), key=lambda item: item[1], reverse=True))[:5])
+
+
+def _buyop_text(opp: ThreadsDemandOpportunity, full: bool = False) -> str:
+    try:
+        products = json.loads(opp.matched_products_json or "[]")
+    except json.JSONDecodeError:
+        products = []
+    product_lines = "\n".join(
+        f"  {idx}. {str(item.get('name') or '')[:70]} ({item.get('match_score')})"
+        for idx, item in enumerate(products[:4], start=1)
+    ) or "  chưa có"
+    base = [
+        f"Buy opportunity #{opp.id} | {opp.status}",
+        f"- user: @{opp.author_username or 'unknown'}",
+        f"- intent: {opp.intent} | score: {opp.purchase_intent_score:.0f}",
+        f"- nhu cầu: {opp.normalized_query[:180]}",
+        f"- keyword: {opp.matched_keyword}",
+        f"- permalink: {opp.permalink or 'chưa có'}",
+        "- products:",
+        product_lines,
+    ]
+    if full:
+        base.extend(
+            [
+                f"- gốc: {opp.source_text_excerpt[:500]}",
+                "Comment đề xuất:",
+                opp.suggested_comment,
+                "Lệnh:",
+                f"- /approvebuy {opp.id}",
+                f"- /replybuy {opp.id}",
+                f"- /skipbuy {opp.id}",
+                f"- /editbuy {opp.id} <comment mới>",
+            ]
+        )
+    else:
+        base.extend(["Comment:", opp.suggested_comment[:500]])
+    return "\n".join(base)
+
+
+def _parse_ids(raw: str) -> list[int]:
+    ids = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    return ids
+
+
 def build_application() -> Application:
     settings = get_settings()
     if not settings.telegram_bot_token:
@@ -1573,6 +2077,24 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("autolearn", autolearn))
     app.add_handler(CommandHandler("ideas", ideas))
     app.add_handler(CommandHandler("accounts", accounts))
+    app.add_handler(CommandHandler("syncposts", syncposts))
+    app.add_handler(CommandHandler("syncinsights", syncinsights))
+    app.add_handler(CommandHandler("syncreplies", syncreplies))
+    app.add_handler(CommandHandler("threadstats", threadstats))
+    app.add_handler(CommandHandler("accountperformance", accountperformance))
+    app.add_handler(CommandHandler("threadtrends", threadtrends))
+    app.add_handler(CommandHandler("mentions", mentions))
+    app.add_handler(CommandHandler("replysuggestions", replysuggestions))
+    app.add_handler(CommandHandler("delete_thread", delete_thread))
+    app.add_handler(CommandHandler("scanthreads", scanthreads))
+    app.add_handler(CommandHandler("buyops", buyops))
+    app.add_handler(CommandHandler("buyop", buyop))
+    app.add_handler(CommandHandler("approvebuy", approvebuy))
+    app.add_handler(CommandHandler("approvebuybatch", approvebuybatch))
+    app.add_handler(CommandHandler("editbuy", editbuy))
+    app.add_handler(CommandHandler("skipbuy", skipbuy))
+    app.add_handler(CommandHandler("replybuy", replybuy))
+    app.add_handler(CommandHandler("replybuybatch", replybuybatch))
     app.add_handler(CommandHandler("engagepost", engagepost))
     app.add_handler(CallbackQueryHandler(choose_engagement_persona, pattern=r"^engage_persona:(daily|controversial|advisor)$"))
     app.add_handler(CallbackQueryHandler(choose_engagement_mode, pattern=r"^engage_mode:(viral|advice|ask|quote|observation)$"))

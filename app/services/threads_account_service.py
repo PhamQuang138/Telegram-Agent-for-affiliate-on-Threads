@@ -4,7 +4,7 @@ import os
 from itertools import count
 
 from app.config import get_settings
-from app.services.learning_engine import load_learned_weights
+from app.services.learning_engine import load_account_learning_profile, load_learned_weights
 
 _ROUND_ROBIN = count()
 
@@ -111,6 +111,14 @@ def select_account_for_post(post: dict, accounts: list[dict]) -> dict:
         if persona and persona in text:
             score += 6
         score += sum(3 for topic in topics if topic and topic in text)
+        goal = str(post.get("content_goal") or post.get("content_type") or "").lower()
+        profile = load_account_learning_profile(account.get("name", ""))
+        account_weights = profile.get("weights") or {}
+        for topic, value in (account_weights.get("topics") or {}).items():
+            if str(topic).lower() in text:
+                score *= float(value)
+        if goal == "engagement" and (account_weights.get("hook_types") or {}):
+            score += 1.0
         score *= float(weights.get(account.get("name"), 1.0))
         recent_posts = post.get("recent_posts") or []
         if len(valid) > 1 and recent_posts:

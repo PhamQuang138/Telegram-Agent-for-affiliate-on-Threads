@@ -38,6 +38,9 @@ python -m app.main
 - Queue, preview, approve, regenerate, delete, and post drafts from Telegram.
 - Post to Threads through the official Threads API.
 - Track clicks through `GET /go/{slug}` and store analytics in SQLite.
+- Sync official Threads metrics, replies, mentions, and keyword-search signals when token permissions allow it.
+- Learn separate content strategy profiles per Threads account.
+- Scan public Threads keyword-search results for purchase demand, create affiliate reply opportunities, and wait for manual approval before replying.
 - Rotate AI providers/models with cooldowns for quota, rate limits, and temporary provider failures.
 
 ## Setup
@@ -85,8 +88,30 @@ INCLUDE_TRACKING_LINK_IN_THREADS=false
 POST_TRACKING_LINK_AS_REPLY=true
 COMMENT_LINK_TARGET=affiliate
 
+IMPORT_EXTERNAL_THREADS_POSTS=false
+THREADS_ANALYTICS_SYNC_ENABLED=true
+THREADS_ANALYTICS_SYNC_INTERVAL_MINUTES=60
+THREADS_REPLIES_SYNC_ENABLED=true
+THREADS_KEYWORD_SEARCH_ENABLED=false
+THREADS_INSIGHTS_LOOKBACK_DAYS=30
+THREADS_LEARNING_MIN_POSTS=10
+THREADS_AUTO_LEARN_INTERVAL_HOURS=6
+THREADS_REPLY_RETENTION_DAYS=90
+THREADS_KEYWORD_SAMPLE_RETENTION_DAYS=7
+
+THREADS_DEMAND_SCANNER_ENABLED=false
+THREADS_DEMAND_MIN_SCORE=70
+THREADS_DEMAND_MAX_RESULTS_PER_SCAN=10
+THREADS_DEMAND_MAX_APPROVE_BATCH=5
+THREADS_DEMAND_MAX_REPLY_BATCH=3
+THREADS_DEMAND_MAX_REPLIES_PER_ACCOUNT_PER_DAY=3
+THREADS_DEMAND_REPLY_COOLDOWN_MINUTES=30
+THREADS_DEMAND_OPPORTUNITY_TTL_HOURS=36
+THREADS_DEMAND_MAX_LINKS_PER_COMMENT=4
+THREADS_DEMAND_MANUAL_APPROVAL_REQUIRED=true
+
 OPENROUTER_API_KEY=
-OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free,cohere/north-mini-code:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-super-120b-a12b:free,openai/gpt-oss-120b:free,nvidia/nemotron-3-nano-30b-a3b:free,qwen/qwen3-next-80b-a3b-instruct:free,poolside/laguna-m.1:free
+OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free,cohere/north-mini-code:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-super-120b-a12b:free,openai/gpt-oss-120b:free,nvidia/nemotron-3-nano-30b-a3b:free,qwen/qwen3-next-80b-a3b-instruct:free,poolside/laguna-m.1:free,cognitivecomputations/dolphin-mistral-24b-venice-edition:free,tencent/hy3:free
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
 # Optional fallback providers
@@ -143,6 +168,23 @@ Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage
 /performance
 /ideas [keyword]
 /accounts
+/syncposts [account_name]
+/syncinsights [account_name]
+/syncreplies [account_name]
+/threadstats <post_id>
+/accountperformance <account_name>
+/threadtrends <keyword>
+/mentions [account_name]
+/replysuggestions <post_id>
+/scanthreads [keyword] [account_name]
+/buyops [limit]
+/buyop <id>
+/approvebuy <id>
+/approvebuybatch <id1,id2,id3>
+/editbuy <id> <comment>
+/skipbuy <id>
+/replybuy <id> [account_name]
+/replybuybatch <id1,id2,id3> [account_name]
 
 /importcsv <csv_path> [group_size]
 /updatelink <csv_path> [group_size]
@@ -161,6 +203,7 @@ Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage
 /approve <post_id>
 /post <post_id> [account_name]
 /replylinks <post_id>
+/delete_thread <post_id> confirm
 /delete <post_id>
 /analytics
 ```
@@ -218,6 +261,103 @@ performance_score
 ```
 
 `/performance` shows which persona, angle, and hook type have the best click history.
+
+## Threads Analytics Sync
+
+The bot can use official Threads API permissions when your account token has them:
+
+```text
+threads_manage_insights
+threads_read_replies
+threads_keyword_search
+threads_manage_mentions
+threads_delete
+```
+
+Optional permissions skip gracefully. If a token lacks a permission, posting and local click tracking still work.
+
+Manual sync and analysis commands:
+
+```text
+/syncposts [account_name]
+/syncinsights [account_name]
+/syncreplies [account_name]
+/threadstats <post_id>
+/accountperformance <account_name>
+/threadtrends <keyword>
+/mentions [account_name]
+/replysuggestions <post_id>
+```
+
+`/replysuggestions` only suggests replies for manual approval. The bot does not auto-reply, auto-DM, or interact with keyword-search results.
+
+The background sync loop starts with `python -m app.main` when analytics or reply sync is enabled. It waits for `THREADS_ANALYTICS_SYNC_INTERVAL_MINUTES` before the first run and uses a lock so sync jobs do not overlap.
+
+New metric tables:
+
+```text
+threads_post_metrics
+threads_replies
+threads_keyword_snapshots
+account_learning_profiles
+```
+
+Keyword search stores aggregate signals only: result count, recent result count, related topics, common intents, and tone summary. It does not keep a long-term raw-post corpus.
+
+Learning is account-specific. Each Threads account gets its own profile after it has enough posts with metric data, controlled by `THREADS_LEARNING_MIN_POSTS`.
+
+## Purchase Demand Scanner
+
+The MVP scanner uses the official Threads keyword search API only. It does not scrape Threads HTML and it does not auto-reply.
+
+Enable it explicitly:
+
+```env
+THREADS_DEMAND_SCANNER_ENABLED=true
+THREADS_KEYWORD_SEARCH_ENABLED=true
+```
+
+Workflow:
+
+```text
+/scanthreads
+/scanthreads quạt mini
+/scanthreads áo khoác nam acc1
+/buyops 5
+/buyop <id>
+/approvebuy <id>
+/replybuy <id> [account_name]
+```
+
+Batch commands require explicit IDs:
+
+```text
+/approvebuybatch 12,14,17
+/replybuybatch 12,14,17 acc1
+```
+
+Safety defaults:
+
+- Scanner is disabled by default.
+- Every opportunity requires manual approval.
+- Batch approve is capped by `THREADS_DEMAND_MAX_APPROVE_BATCH`.
+- Batch reply is capped by `THREADS_DEMAND_MAX_REPLY_BATCH`.
+- Daily reply limit per account is controlled by `THREADS_DEMAND_MAX_REPLIES_PER_ACCOUNT_PER_DAY`.
+- Opportunity records expire after `THREADS_DEMAND_OPPORTUNITY_TTL_HOURS`.
+
+Scanner flow:
+
+```text
+Threads keyword search
+-> purchase-intent classification
+-> Shopee catalog match
+-> suggested comment with 2-4 links
+-> Telegram review
+-> manual approve
+-> reply to Threads
+```
+
+The bot skips low-intent posts, seller spam, bought-done posts, unsafe topics, duplicates, expired opportunities, and opportunities that do not match at least one catalog product.
 
 ## Trend Collection Engine
 
@@ -605,6 +745,17 @@ app/services/persona_library.py
 app/services/angle_library.py
 app/services/content_diversity.py
 app/services/topic_memory.py
+app/services/threads_api_client.py
+app/services/threads_sync_service.py
+app/services/threads_insights_service.py
+app/services/threads_reply_service.py
+app/services/reply_analysis.py
+app/services/reply_suggestion_service.py
+app/services/threads_analytics_scheduler.py
+app/services/purchase_intent.py
+app/services/demand_product_matcher.py
+app/services/demand_comment_generator.py
+app/services/threads_demand_scanner.py
 prompts/threads_shopee_prompt.txt
 prompts/threads_engagement_prompt.txt
 prompts/affiliate_content_engine_prompt.txt
@@ -621,7 +772,7 @@ Run the offline test suite:
 python -m pytest
 ```
 
-Tests cover product scoring, content quality, duplicate detection, library selection, diversity checks, content ideas, Google Suggest mocking, content-engine fallback, and idempotent SQLite migration.
+Tests cover product scoring, content quality, duplicate detection, library selection, diversity checks, content ideas, Google Suggest mocking, content-engine fallback, Threads sync/insight/reply handling, demand scanning safety, and idempotent SQLite migration.
 
 ## Repository Hygiene
 

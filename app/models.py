@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -29,6 +29,7 @@ class ThreadsPost(Base):
     hook_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     story_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    content_goal: Mapped[str | None] = mapped_column(String(64), nullable=True)
     diversity_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     target_platform: Mapped[str | None] = mapped_column(String(64), nullable=True)
     click_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -105,3 +106,114 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_at: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class ThreadsPostMetric(Base):
+    __tablename__ = "threads_post_metrics"
+    __table_args__ = (UniqueConstraint("account_name", "threads_media_id", name="uq_threads_metric_account_media"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    post_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    threads_media_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    account_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    threads_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    likes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    replies: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reposts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quotes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    click_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    affiliate_ctr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    engagement_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    purchase_intent_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    performance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ThreadsReply(Base):
+    __tablename__ = "threads_replies"
+    __table_args__ = (UniqueConstraint("account_name", "reply_media_id", name="uq_threads_reply_account_reply"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    post_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    threads_media_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    reply_media_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    account_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    reply_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reply_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reply_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    intent: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    sentiment: Mapped[str] = mapped_column(String(32), nullable=False, default="neutral")
+    asks_for_link: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    asks_for_price: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    product_interest: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_spam: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ThreadsKeywordSnapshot(Base):
+    __tablename__ = "threads_keyword_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    account_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recent_result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    related_topics_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    common_intents_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    tone_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class AccountLearningProfile(Base):
+    __tablename__ = "account_learning_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    profile_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ThreadsDemandOpportunity(Base):
+    __tablename__ = "threads_demand_opportunities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    external_post_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    author_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    author_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    permalink: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_text_excerpt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    matched_keyword: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    intent: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    purchase_intent_score: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    category: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    normalized_query: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    matched_products_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    suggested_comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="new", index=True)
+    scan_account_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    reply_account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    threads_reply_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ThreadsDemandAction(Base):
+    __tablename__ = "threads_demand_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    result: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    details: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

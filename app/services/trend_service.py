@@ -14,8 +14,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ClickLog, ThreadsPost, ThreadsPostLink, TrendSnapshot
+from app.models import ClickLog, ThreadsKeywordSnapshot, ThreadsPost, ThreadsPostLink, TrendSnapshot
 from app.services.learning_engine import load_learned_weights
+from app.services.reply_analysis import analyze_reply
+from app.services.threads_account_service import load_threads_accounts
+from app.services.threads_api_client import search_threads_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -101,13 +104,35 @@ class GoogleTrendsProvider:
 class ThreadsKeywordSearchProvider:
     source = "threads"
 
+    def __init__(self, db: Session | None = None, keyword: str | None = None):
+        self.db = db
+        self.keyword = keyword
+
     def collect(self, region: str = "VN") -> list[TrendSignal]:
         settings = get_settings()
-        if not settings.threads_access_token or not settings.threads_user_id:
-            logger.info("Threads keyword provider skipped: missing token/user permission")
+        if not settings.threads_keyword_search_enabled:
+            logger.info("Threads keyword provider skipped: THREADS_KEYWORD_SEARCH_ENABLED=false")
             return []
-        logger.info("Threads keyword provider skipped: official keyword search integration not configured")
-        return []
+        accounts = [account for account in load_threads_accounts() if account.get("enabled")]
+        if not accounts:
+            logger.info("Threads keyword provider skipped: missing valid account")
+            return []
+        seeds = [self.keyword] if self.keyword else [signal.keyword for signal in SeasonProvider().collect(region=region)[:3]]
+        signals: list[TrendSignal] = []
+        for account in accounts[:1]:
+            for keyword in seeds:
+                snapshot = collect_threads_keyword_snapshot(account, keyword, limit=30, db=self.db)
+                if not snapshot:
+                    continue
+                signals.append(
+                    TrendSignal(
+                        keyword=snapshot["keyword"],
+                        source=self.source,
+                        score=float(snapshot["score"]),
+                        reason=snapshot["reason"],
+                    )
+                )
+        return signals
 
 
 class ShopeeCatalogProvider:
@@ -275,7 +300,7 @@ def get_trending_keywords(
 
     providers = [
         GoogleTrendsProvider(),
-        ThreadsKeywordSearchProvider(),
+        ThreadsKeywordSearchProvider(db),
         ShopeeCatalogProvider(db),
         ClickHistoryProvider(db),
         SeasonProvider(),
@@ -387,6 +412,90 @@ def _merge_signals(signals: Iterable[TrendSignal]) -> list[dict]:
             }
         )
     return sorted(items, key=lambda item: item["trend_score"], reverse=True)
+
+
+def collect_threads_keyword_snapshot(account: dict, keyword: str, limit: int = 50, db: Session | None = None) -> dict:
+    keyword = _clean_keyword(keyword)
+    if not keyword:
+        return {}
+    try:
+        rows = search_threads_keywords(account, keyword, limit=limit)
+    except Exception as exc:
+        logger.info("Threads keyword search skipped for %s: %s", keyword, exc)
+        return {}
+
+    now = datetime.now(timezone.utc)
+    recent_cutoff = now - timedelta(days=2)
+    result_count = len(rows)
+    recent_count = 0
+    related_counter: Counter[str] = Counter()
+    intent_counter: Counter[str] = Counter()
+    sentiment_counter: Counter[str] = Counter()
+
+    for row in rows:
+        text = str(row.get("text") or "")[:500]
+        analysis = analyze_reply(text)
+        intent_counter[analysis["intent"]] += 1
+        sentiment_counter[analysis["sentiment"]] += 1
+        for topic in _extract_keywords(text)[:3]:
+            if topic != keyword:
+                related_counter[topic] += 1
+        timestamp = _parse_dt(row.get("timestamp"))
+        if timestamp and timestamp >= recent_cutoff:
+            recent_count += 1
+
+    score = _threads_keyword_score(result_count, recent_count, intent_counter)
+    related_topics = [item for item, _count in related_counter.most_common(8)]
+    common_intents = [item for item, _count in intent_counter.most_common(5)]
+    tone = _tone_summary(sentiment_counter, intent_counter)
+    snapshot = {
+        "keyword": keyword,
+        "source": "threads_keyword_search",
+        "score": score,
+        "result_count": result_count,
+        "recent_result_count": recent_count,
+        "related_topics": related_topics,
+        "common_intents": common_intents,
+        "tone_summary": tone,
+        "reason": f"{recent_count}/{result_count} kết quả gần đây; intent phổ biến: {', '.join(common_intents[:3]) or 'chưa rõ'}",
+    }
+    if db is not None:
+        db.add(
+            ThreadsKeywordSnapshot(
+                keyword=keyword,
+                account_name=str(account.get("name") or "default"),
+                result_count=result_count,
+                recent_result_count=recent_count,
+                related_topics_json=json.dumps(related_topics, ensure_ascii=False),
+                common_intents_json=json.dumps(common_intents, ensure_ascii=False),
+                tone_summary=tone,
+                sampled_at=now,
+            )
+        )
+        db.commit()
+    return snapshot
+
+
+def _threads_keyword_score(result_count: int, recent_count: int, intents: Counter[str]) -> float:
+    recent_score = min(100, recent_count * 12)
+    count_score = min(100, result_count * 3)
+    purchase_signal = min(100, (intents.get("ask_link", 0) * 3 + intents.get("ask_price", 0) * 2 + intents.get("product_interest", 0) * 2) * 10)
+    return round(recent_score * 0.5 + count_score * 0.25 + 50 * 0.15 + purchase_signal * 0.10, 1)
+
+
+def _tone_summary(sentiments: Counter[str], intents: Counter[str]) -> str:
+    sentiment = sentiments.most_common(1)[0][0] if sentiments else "neutral"
+    intent = intents.most_common(1)[0][0] if intents else "unknown"
+    return f"tone {sentiment}, intent {intent}"
+
+
+def _parse_dt(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _extract_keywords(product_name: str) -> list[str]:

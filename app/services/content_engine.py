@@ -9,7 +9,7 @@ from app.services.content_diversity import build_diversity_key, should_reduce_re
 from app.services.content_quality import evaluate_content
 from app.services.content_similarity import is_too_similar
 from app.services.hook_library import choose_hook
-from app.services.learning_engine import compact_learning_profile
+from app.services.learning_engine import compact_account_learning_context, compact_learning_profile
 from app.services.persona_library import select_persona
 from app.services.product_scoring import score_products
 
@@ -86,6 +86,7 @@ def generate_affiliate_content(
         "angle_id": angle_obj.get("id", ""),
         "hook_type": hook_type,
         "content_type": "affiliate_threads",
+        "content_goal": "affiliate",
         "diversity_key": diversity_key,
         "content": content,
         "cta": "",
@@ -180,12 +181,16 @@ def prompt_payload(
         }
         for item in local_plan["selected_products"][:3]
     ]
+    account_name = str((idea_context or {}).get("account_name") or "").strip()
+    learning_context = compact_learning_profile()
+    if account_name:
+        learning_context["account_profile"] = compact_account_learning_context(account_name)
     return {
         "keyword": keyword or "",
         "products_json": json.dumps(compact_products, ensure_ascii=False),
         "previous_posts": "\n---\n".join(previous_posts) or "None",
         "analytics_context": json.dumps(analytics_context or {}, ensure_ascii=False),
-        "learning_context": json.dumps(compact_learning_profile(), ensure_ascii=False),
+        "learning_context": json.dumps(learning_context, ensure_ascii=False),
         "idea_context": json.dumps(idea_context or {}, ensure_ascii=False),
         "target_platform": target_platform,
         "local_plan": {**local_plan, "selected_products": compact_products},
