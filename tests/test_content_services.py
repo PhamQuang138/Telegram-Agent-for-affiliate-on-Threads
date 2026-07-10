@@ -507,6 +507,13 @@ def test_purchase_intent_rules_and_price_extract() -> None:
     assert not general["eligible"]
 
 
+def test_build_scan_keywords_manual_stays_narrow(monkeypatch) -> None:
+    monkeypatch.setattr(threads_demand_scanner, "SessionLocal", lambda: (_ for _ in ()).throw(AssertionError("manual keyword should not read db")))
+    keywords = threads_demand_scanner.build_scan_keywords("quần áo", limit=30)
+    assert len(keywords) == 5
+    assert all("quần áo" in keyword for keyword in keywords)
+
+
 def test_product_matcher_respects_budget_and_relevance(monkeypatch) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -582,6 +589,11 @@ def test_replybuy_requires_approval_and_expiry(monkeypatch) -> None:
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     monkeypatch.setattr(threads_demand_scanner, "SessionLocal", Session)
+    monkeypatch.setattr(threads_demand_scanner, "get_settings", lambda: SimpleNamespace(
+        threads_demand_max_links_per_comment=4,
+        threads_demand_max_replies_per_account_per_day=3,
+        threads_demand_reply_cooldown_minutes=30,
+    ))
     monkeypatch.setenv("THREADS_ACCOUNTS", "acc1")
     monkeypatch.setenv("THREADS_ACC1_USER_ID", "111")
     monkeypatch.setenv("THREADS_ACC1_ACCESS_TOKEN", "tok1")
@@ -650,6 +662,11 @@ def test_daily_limit_blocks_reply(monkeypatch) -> None:
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     monkeypatch.setattr(threads_demand_scanner, "SessionLocal", Session)
+    monkeypatch.setattr(threads_demand_scanner, "get_settings", lambda: SimpleNamespace(
+        threads_demand_max_links_per_comment=4,
+        threads_demand_max_replies_per_account_per_day=3,
+        threads_demand_reply_cooldown_minutes=30,
+    ))
     monkeypatch.setenv("THREADS_ACCOUNTS", "acc1")
     monkeypatch.setenv("THREADS_ACC1_USER_ID", "111")
     monkeypatch.setenv("THREADS_ACC1_ACCESS_TOKEN", "tok1")

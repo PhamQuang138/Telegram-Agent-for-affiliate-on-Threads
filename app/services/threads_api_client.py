@@ -66,13 +66,30 @@ def search_threads_keywords(account: dict, keyword: str, limit: int = 50) -> lis
     params = {
         "q": keyword,
         "fields": "id,text,timestamp,username",
+        "search_type": "TOP",
+        "search_mode": "KEYWORD",
         "limit": max(1, min(limit, 100)),
     }
     return _paged_get(account, "/keyword_search", params=params, limit=limit, optional=True)
 
 
 def search_keyword(account: dict, keyword: str, limit: int = 50) -> list[dict]:
-    return search_threads_keywords(account, keyword, limit=limit)
+    errors: list[str] = []
+    for search_type in ("TOP", "RECENT"):
+        params = {
+            "q": keyword,
+            "search_type": search_type,
+            "search_mode": "KEYWORD",
+            "fields": "id,media_product_type,media_type,permalink,username,text,timestamp,shortcode,is_quote_post,has_replies",
+            "limit": max(1, min(limit, 100)),
+        }
+        try:
+            return _paged_get(account, "/keyword_search", params=params, limit=limit, optional=False)
+        except ThreadsApiError as exc:
+            errors.append(f"{search_type}: {exc}")
+            if exc.code not in {"temporary_error", "rate_limited"}:
+                raise
+    raise ThreadsApiError("; ".join(errors), code="temporary_error")
 
 
 def publish_reply(account: dict, reply_to_id: str, text: str) -> dict:
@@ -190,6 +207,11 @@ def _raise_for_response(response: httpx.Response, *, optional: bool) -> None:
     status = response.status_code
     raw = response.text[:500]
     lowered = raw.lower()
+    if status >= 500:
+        hint = "temporary upstream error"
+        if "permission" in lowered or "access" in lowered:
+            hint = "Meta returned a server error that mentions permission/access; check app review and token scopes"
+        raise ThreadsApiError(f"Threads API {hint} HTTP {status}: {raw}", status_code=status, code="temporary_error", optional=optional)
     if status in {401, 403} or "permission" in lowered:
         exc_cls = ThreadsPermissionError
         code = "permission_denied"
@@ -199,8 +221,6 @@ def _raise_for_response(response: httpx.Response, *, optional: bool) -> None:
         raise exc_cls(f"Threads API permission/token error HTTP {status}.", status_code=status, code=code, optional=optional)
     if status == 429:
         raise ThreadsRateLimitError("Threads API rate limit.", status_code=status, code="rate_limited", optional=optional)
-    if status >= 500:
-        raise ThreadsApiError(f"Threads API temporary error HTTP {status}.", status_code=status, code="temporary_error", optional=optional)
     raise ThreadsApiError(f"Threads API error HTTP {status}: {raw}", status_code=status, code="api_error", optional=optional)
 
 

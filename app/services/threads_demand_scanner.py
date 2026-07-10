@@ -39,9 +39,13 @@ INTENT_PHRASES = [
 
 
 def build_scan_keywords(manual_keyword: str | None = None, limit: int = 30) -> list[str]:
-    seeds: list[str] = []
     if manual_keyword:
-        seeds.append(manual_keyword.strip())
+        manual = manual_keyword.strip()
+        phrases = ["xin link", "mua ở đâu", "recommend", "nên mua loại nào"]
+        keywords = [manual, *[f"{phrase} {manual}" for phrase in phrases]]
+        return list(dict.fromkeys(keyword for keyword in keywords if keyword.strip()))[: max(1, limit)]
+
+    seeds: list[str] = []
     with SessionLocal() as db:
         product_rows = list(db.scalars(select(ThreadsPostLink.product_name).order_by(ThreadsPostLink.id.desc()).limit(200)))
         seeds.extend(_product_keyword(name) for name in product_rows)
@@ -50,14 +54,10 @@ def build_scan_keywords(manual_keyword: str | None = None, limit: int = 30) -> l
         except Exception:
             pass
     seeds = [seed for seed in dict.fromkeys(_clean(seed) for seed in seeds) if seed]
-    if manual_keyword:
-        phrases = ["xin link", "mua ở đâu", "recommend", "nên mua loại nào", "dưới 200k"]
-        keywords = [manual_keyword.strip(), *[f"{phrase} {manual_keyword.strip()}" for phrase in phrases]]
-    else:
-        keywords = []
-        for seed in seeds[:10]:
-            for phrase in ["xin link", "mua ở đâu", "recommend", "nên mua", "dưới 200k"]:
-                keywords.append(f"{phrase} {seed}")
+    keywords = []
+    for seed in seeds[:10]:
+        for phrase in ["xin link", "mua ở đâu", "recommend", "nên mua", "dưới 200k"]:
+            keywords.append(f"{phrase} {seed}")
     keywords.extend(INTENT_PHRASES[:5])
     return list(dict.fromkeys(keyword for keyword in keywords if keyword.strip()))[: max(1, limit)]
 
@@ -163,6 +163,8 @@ def scan_threads_demand(
     with SessionLocal() as db:
         _log_action(db, None, "scanned", account["name"], "ok", json.dumps(result, ensure_ascii=False)[:500])
         db.commit()
+    if result["posts_fetched"] == 0 and not result["errors"]:
+        result["errors"].append("Threads keyword search returned 0 posts. Keyword may be too narrow, endpoint may be unavailable, or this account may not have visible search results.")
     return result
 
 
@@ -317,16 +319,15 @@ def _reply_allowed(db, opp: ThreadsDemandOpportunity, account: dict) -> tuple[bo
     settings = get_settings()
     now = datetime.now(timezone.utc)
     day_start = now - timedelta(hours=24)
-    replied_today = int(
-        db.scalar(
-            select(func.count(ThreadsDemandAction.id)).where(
+    recent_actions = list(
+        db.scalars(
+            select(ThreadsDemandAction).where(
                 ThreadsDemandAction.action == "replied",
                 ThreadsDemandAction.account_name == account["name"],
-                ThreadsDemandAction.created_at >= day_start,
             )
         )
-        or 0
     )
+    replied_today = sum(1 for action in recent_actions if _dt_after(action.created_at, day_start))
     if replied_today >= settings.threads_demand_max_replies_per_account_per_day:
         return False, "daily reply limit reached"
     cooldown = now - timedelta(minutes=settings.threads_demand_reply_cooldown_minutes)
@@ -379,6 +380,16 @@ def _is_expired(opp: ThreadsDemandOpportunity) -> bool:
     if expires_at.tzinfo is None:
         now = now.replace(tzinfo=None)
     return expires_at < now
+
+
+def _dt_after(value: datetime | None, cutoff: datetime) -> bool:
+    if not value:
+        return True
+    if value.tzinfo is None and cutoff.tzinfo is not None:
+        cutoff = cutoff.replace(tzinfo=None)
+    elif value.tzinfo is not None and cutoff.tzinfo is None:
+        value = value.replace(tzinfo=None)
+    return value >= cutoff
 
 
 def _log_action(db, opportunity_id: int | None, action: str, account_name: str | None, result: str, details: str) -> None:
