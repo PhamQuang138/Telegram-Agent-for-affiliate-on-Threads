@@ -139,6 +139,7 @@ Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage
 /trends
 /trenddrafts [limit]
 /trenddrafts <keyword>
+/ideadrafts [limit] [keyword]
 /performance
 /ideas [keyword]
 /accounts
@@ -278,6 +279,16 @@ Generate ideas without creating a draft:
 ```
 
 The response includes suggested need, persona, angle, hook, short post ideas, and matching catalog products if available.
+
+Generate 1-3 drafts from idea seeds:
+
+```text
+/ideadrafts
+/ideadrafts 3
+/ideadrafts 2 quạt mini
+```
+
+`/ideadrafts` first creates internal ideas with need/persona/angle/hook, then writes drafts from those idea seeds. `/trenddrafts` also uses idea seeds internally so trend drafts are more specific than plain keyword drafts.
 
 ## Diversity And Topic Memory
 

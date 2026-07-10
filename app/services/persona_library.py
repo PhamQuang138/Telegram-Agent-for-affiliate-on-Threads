@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from app.services.learning_engine import load_learned_weights
+
 
 FALLBACK_PERSONAS = [
     {
@@ -38,14 +40,20 @@ def select_persona(
         ]
     ).lower()
     top_persona = _top_analytics_name(analytics_context or {})
+    weights = load_learned_weights().get("personas", {})
+    recent = (analytics_context or {}).get("recent_posts", [])
 
     scored = []
     for persona in personas:
-        score = 0
+        score = 1.0
         topics = [str(topic).lower() for topic in persona.get("topics", [])]
         score += sum(8 for topic in topics if topic and topic in text)
         if top_persona and top_persona in {persona.get("id"), persona.get("name")}:
             score += 3
+        score *= float(weights.get(persona.get("id"), weights.get(persona.get("name"), 1.0)))
+        recent_count = sum(1 for post in recent[:10] if post.get("persona_id") == persona.get("id"))
+        if recent_count >= 5:
+            score *= 0.55
         scored.append((score, persona))
 
     scored.sort(key=lambda item: item[0], reverse=True)

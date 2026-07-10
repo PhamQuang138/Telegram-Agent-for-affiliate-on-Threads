@@ -8,6 +8,7 @@ Keyword: {keyword}
 Top products JSON: {products_json}
 Previous posts: {previous_posts}
 Analytics context JSON: {analytics_context}
+Learning signal JSON: {learning_context}
 Target platform: {target_platform}
 
 PIPELINE
@@ -32,6 +33,7 @@ REQUIREMENTS
 - CTA can be empty or very soft.
 - Hashtags: 0-2.
 - Compare with previous posts and rewrite if similar.
+- Treat learning signal as a soft internal hint only, not proof. Do not mention performance data.
 - Avoid formulaic openings like "Chuyện là", "Hot take nhẹ", "Mình vừa note".
 - Avoid mixed English/Chinese/Korean/Japanese artifacts.
 

@@ -269,6 +269,17 @@ def list_catalog_links(db: Session, limit: int = 50) -> list[ThreadsPostLink]:
     return unique_links
 
 
+def catalog_link_counts(db: Session) -> dict[str, int]:
+    total_links = db.scalar(select(func.count()).select_from(ThreadsPostLink)) or 0
+    unique_links = db.scalar(select(func.count(func.distinct(ThreadsPostLink.affiliate_url)))) or 0
+    posts_with_links = db.scalar(select(func.count(func.distinct(ThreadsPostLink.post_id)))) or 0
+    return {
+        "total_links": int(total_links),
+        "unique_links": int(unique_links),
+        "posts_with_links": int(posts_with_links),
+    }
+
+
 def add_affiliate_link(db: Session, post_id: int, affiliate_url: str) -> ThreadsPost | None:
     post = get_post(db, post_id)
     if not post or post.status == "deleted":

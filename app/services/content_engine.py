@@ -9,6 +9,7 @@ from app.services.content_diversity import build_diversity_key, should_reduce_re
 from app.services.content_quality import evaluate_content
 from app.services.content_similarity import is_too_similar
 from app.services.hook_library import choose_hook
+from app.services.learning_engine import compact_learning_profile
 from app.services.persona_library import select_persona
 from app.services.product_scoring import score_products
 
@@ -120,14 +121,55 @@ def generate_content_ideas(
     return ideas
 
 
+def generate_affiliate_content_from_idea(
+    keyword: str | None,
+    products: list[dict],
+    idea: dict,
+    previous_posts: list[str],
+    analytics_context: dict | None = None,
+    target_platform: str = "threads",
+) -> dict:
+    keyword = (keyword or idea.get("keyword") or "đồ tiện ích").strip()
+    analytics_context = analytics_context or {}
+    scored_products = score_products(products, keyword, analytics_context)
+    selected = scored_products[: min(4, len(scored_products))]
+    base = generate_affiliate_content(keyword, products, previous_posts, analytics_context, target_platform)
+
+    content = _clean(str(idea.get("idea") or idea.get("content") or base["content"]))
+    if is_too_similar(content, previous_posts) or len(content) < 90:
+        content = base["content"]
+
+    quality = evaluate_content(
+        content,
+        [str(item.get("product_name") or "") for item in selected],
+        previous_posts,
+    )
+    return {
+        **base,
+        "need": str(idea.get("need") or base["need"]),
+        "persona": str(idea.get("persona") or base["persona"]),
+        "angle": str(idea.get("angle") or base["angle"]),
+        "hook": str(idea.get("hook") or base.get("hook") or ""),
+        "content": content,
+        "quality_score": int(quality["score"]),
+        "reasoning": "Draft được sinh từ idea seed có sẵn need/persona/angle/hook, rồi kiểm tra quality/similarity.",
+        "selected_products": selected,
+    }
+
+
 def prompt_payload(
     keyword: str | None,
     products: list[dict],
     previous_posts: list[str],
     analytics_context: dict | None = None,
     target_platform: str = "threads",
+    idea_context: dict | None = None,
 ) -> dict:
-    local_plan = generate_affiliate_content(keyword, products, previous_posts, analytics_context, target_platform)
+    local_plan = (
+        generate_affiliate_content_from_idea(keyword, products, idea_context, previous_posts, analytics_context, target_platform)
+        if idea_context
+        else generate_affiliate_content(keyword, products, previous_posts, analytics_context, target_platform)
+    )
     compact_products = [
         {
             "product_name": item.get("product_name") or item.get("name") or "",
@@ -143,6 +185,8 @@ def prompt_payload(
         "products_json": json.dumps(compact_products, ensure_ascii=False),
         "previous_posts": "\n---\n".join(previous_posts) or "None",
         "analytics_context": json.dumps(analytics_context or {}, ensure_ascii=False),
+        "learning_context": json.dumps(compact_learning_profile(), ensure_ascii=False),
+        "idea_context": json.dumps(idea_context or {}, ensure_ascii=False),
         "target_platform": target_platform,
         "local_plan": {**local_plan, "selected_products": compact_products},
     }

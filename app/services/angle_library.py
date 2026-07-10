@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from app.services.learning_engine import load_learned_weights
+
 
 FALLBACK_ANGLES = [
     {
@@ -37,14 +39,20 @@ def select_angle(
         ]
     ).lower()
     top_angle = _top_analytics_name(analytics_context or {})
+    weights = load_learned_weights().get("angles", {})
+    recent = (analytics_context or {}).get("recent_posts", [])
 
     scored = []
     for angle in angles:
-        score = 0
+        score = 1.0
         best_for = [str(item).lower() for item in angle.get("best_for", [])]
         score += sum(8 for item in best_for if item and item in text)
         if top_angle and top_angle in {angle.get("id"), angle.get("name")}:
             score += 3
+        score *= float(weights.get(angle.get("id"), weights.get(angle.get("name"), 1.0)))
+        recent_count = sum(1 for post in recent[:10] if post.get("angle_id") == angle.get("id"))
+        if recent_count >= 5:
+            score *= 0.55
         scored.append((score, angle))
 
     scored.sort(key=lambda item: item[0], reverse=True)

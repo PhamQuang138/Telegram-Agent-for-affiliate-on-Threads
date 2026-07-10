@@ -2,6 +2,8 @@ import json
 import random
 from pathlib import Path
 
+from app.services.learning_engine import load_learned_weights
+
 
 FALLBACK_HOOKS = {
     "observation": ["Có mấy chuyện nhỏ mà gặp mỗi ngày là đủ mệt..."],
@@ -23,9 +25,24 @@ def load_hooks() -> dict:
 def choose_hook(hook_type: str | None = None, avoid: list[str] | None = None) -> dict:
     hooks = load_hooks()
     avoid = [item.lower().strip() for item in (avoid or []) if item.strip()]
-    selected_type = hook_type if hook_type in hooks else random.choice(list(hooks.keys()))
+    weights = load_learned_weights().get("hook_types", {})
+    selected_type = hook_type if hook_type in hooks else _weighted_hook_type(list(hooks.keys()), weights)
     candidates = [hook for hook in hooks.get(selected_type, []) if hook.lower().strip() not in avoid]
     if not candidates:
-        selected_type = random.choice(list(hooks.keys()))
+        selected_type = _weighted_hook_type(list(hooks.keys()), weights)
         candidates = hooks.get(selected_type, []) or FALLBACK_HOOKS["observation"]
     return {"hook": random.choice(candidates), "hook_type": selected_type}
+
+
+def _weighted_hook_type(types: list[str], weights: dict) -> str:
+    if not types:
+        return "observation"
+    weighted = [(hook_type, max(0.1, float(weights.get(hook_type, 1.0)))) for hook_type in types]
+    total = sum(weight for _hook_type, weight in weighted)
+    pick = random.random() * total
+    running = 0.0
+    for hook_type, weight in weighted:
+        running += weight
+        if running >= pick:
+            return hook_type
+    return types[0]

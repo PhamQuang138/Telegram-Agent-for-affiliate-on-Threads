@@ -26,6 +26,7 @@ from app.services.threads_repository import (
     add_affiliate_link,
     analytics_context,
     analytics_summary,
+    catalog_link_counts,
     create_group_post,
     create_post,
     find_catalog_links,
@@ -50,6 +51,13 @@ from app.services.threads_account_service import (
     get_threads_account,
     load_threads_accounts,
     select_account_for_post,
+)
+from app.services.learning_engine import (
+    SETTING_AUTO_LEARNING,
+    learning_status,
+    maybe_run_auto_learning,
+    set_app_setting,
+    update_learned_weights,
 )
 from app.services.trend_service import get_trending_keywords
 from app.services.topic_memory import is_topic_recently_used, record_topic_usage
@@ -295,7 +303,7 @@ def _draft_request_from_links(keyword: str, product_name: str, matched_links: li
     )
 
 
-def _create_content_draft_from_keyword(db: Session, keyword: str) -> ThreadsPost:
+def _create_content_draft_from_keyword(db: Session, keyword: str, idea_context: dict | None = None) -> ThreadsPost:
     matched_links = find_catalog_links(db, keyword, limit=5)
     product_name = keyword
     if matched_links:
@@ -307,6 +315,7 @@ def _create_content_draft_from_keyword(db: Session, keyword: str) -> ThreadsPost
     draft, metadata = generate_threads_shopee_content(
         db,
         _draft_request_from_links(keyword, product_name, matched_links),
+        idea_context=idea_context,
     )
     if len(matched_links) >= 2:
         post = create_group_post(
@@ -352,6 +361,7 @@ def _import_limit() -> int | None:
 
 def _queue_status_text(db: Session) -> str:
     summary = analytics_summary(db)
+    link_counts = catalog_link_counts(db)
     engagement = len(list_posts_by_status(db, "engagement"))
     recent = list_recent_posts(db, limit=5)
     recent_text = "\n".join(
@@ -366,6 +376,10 @@ def _queue_status_text(db: Session) -> str:
         f"- approved: {summary.approved}\n"
         f"- posted: {summary.posted}\n"
         f"- engagement: {engagement}\n\n"
+        "Links trong DB:\n"
+        f"- total: {link_counts['total_links']}\n"
+        f"- unique: {link_counts['unique_links']}\n"
+        f"- posts co links: {link_counts['posts_with_links']}\n\n"
         f"Gan day:\n{recent_text}"
     )
 
@@ -465,7 +479,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 /contentdraft <keyword>
 /trends
 /trenddrafts [limit hoặc keyword]
+/ideadrafts [limit] [keyword]
 /performance
+/learn
+/autolearn on|off
 /ideas [keyword]
 /accounts
 /engagepost <topic>
@@ -881,6 +898,49 @@ async def ideas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Ideas cho keyword: {keyword}\n\n" + "\n\n".join(blocks))
 
 
+async def ideadrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    limit = 2
+    keyword = ""
+    if args:
+        if args[0].isdigit():
+            limit = max(1, min(3, int(args[0])))
+            keyword = " ".join(args[1:]).strip()
+        else:
+            keyword = " ".join(args).strip()
+            limit = 1
+
+    await update.message.reply_text(
+        "Dang tao draft tu idea seed..."
+        + (f"\nKeyword: {keyword}" if keyword else f"\nSo luong: {limit}")
+    )
+    created_posts: list[int] = []
+    with _db() as db:
+        if not keyword:
+            trend_items = get_trending_keywords(db, limit=limit * 3)
+            keywords = [item["keyword"] for item in trend_items[:limit]] or ["đồ tiện ích"]
+        else:
+            keywords = [keyword]
+
+        for current_keyword in keywords[:limit]:
+            links = find_catalog_links(db, current_keyword, limit=5)
+            ideas_list = generate_content_ideas(
+                current_keyword,
+                _post_link_payloads(links),
+                analytics_context(db),
+                count=1,
+            )
+            idea = ideas_list[0] if ideas_list else {}
+            post = _create_content_draft_from_keyword(db, current_keyword, idea_context=idea)
+            created_posts.append(post.id)
+
+    await update.message.reply_text(
+        "Tao idea drafts xong.\n"
+        f"Bai moi: {', '.join(f'#{post_id}' for post_id in created_posts) if created_posts else 'khong co'}"
+    )
+    await _reply_status(update)
+
+
 async def trenddrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
     limit = 2
@@ -909,7 +969,9 @@ async def trenddrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 if len(keywords) >= limit:
                     break
         for keyword in keywords[:limit]:
-            post = _create_content_draft_from_keyword(db, keyword)
+            links = find_catalog_links(db, keyword, limit=5)
+            ideas_list = generate_content_ideas(keyword, _post_link_payloads(links), analytics_context(db), count=1)
+            post = _create_content_draft_from_keyword(db, keyword, idea_context=ideas_list[0] if ideas_list else None)
             created_posts.append(post.id)
 
     await update.message.reply_text(
@@ -922,6 +984,7 @@ async def trenddrafts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with _db() as db:
         summary = performance_summary(db)
+    learn_status = learning_status()
 
     def rows_text(title: str, rows: list[dict]) -> str:
         if not rows:
@@ -954,10 +1017,45 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 rows_text("Bottom persona", summary["bottom_personas"]),
                 rows_text("Bottom angle", summary["bottom_angles"]),
                 rows_text("Bottom hook", summary["bottom_hook_types"]),
+                "Learning status:\n"
+                f"- auto learning: {'on' if learn_status['auto_learning_enabled'] else 'off'}\n"
+                f"- last run: {learn_status['last_learning_run_at'] or 'chua co'}\n"
+                f"- sample size: {learn_status['sample_size']}\n"
+                f"- weights updated: {learn_status['updated_at'] or 'chua co'}",
                 f"Goi y: nen viet them theo vibe '{best}', va giam bot dang hook '{weak}' neu no co nhieu bai nhung it click.",
             ]
         )
     )
+
+
+async def learn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = update_learned_weights(min_posts=10, lookback_days=30)
+    top_persona = result.get("top_personas", [{}])[0].get("name", "chua co") if result.get("top_personas") else "chua co"
+    weak_persona = result.get("weak_personas", [{}])[0].get("name", "chua co") if result.get("weak_personas") else "chua co"
+    top_angle = result.get("top_angles", [{}])[0].get("name", "chua co") if result.get("top_angles") else "chua co"
+    weak_angle = result.get("weak_angles", [{}])[0].get("name", "chua co") if result.get("weak_angles") else "chua co"
+    top_hook = result.get("top_hook_types", [{}])[0].get("name", "chua co") if result.get("top_hook_types") else "chua co"
+    recommendations = "\n".join(f"- {item}" for item in result.get("recommendations", [])) or "- chua co"
+    await update.message.reply_text(
+        "Learning update:\n"
+        f"- enough_data: {result.get('enough_data')}\n"
+        f"- sample size: {result.get('total_posts')}\n"
+        f"- top persona: {top_persona}\n"
+        f"- weak persona: {weak_persona}\n"
+        f"- top angle: {top_angle}\n"
+        f"- weak angle: {weak_angle}\n"
+        f"- top hook_type: {top_hook}\n"
+        f"Goi y:\n{recommendations}"
+    )
+
+
+async def autolearn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or context.args[0].lower() not in {"on", "off"}:
+        await update.message.reply_text("Dung: /autolearn on hoặc /autolearn off")
+        return
+    value = context.args[0].lower()
+    set_app_setting(SETTING_AUTO_LEARNING, value)
+    await update.message.reply_text(f"Auto learning: {value}")
 
 
 async def accounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1360,10 +1458,14 @@ async def post_to_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         post.status = "posted"
         db.commit()
         db.refresh(post)
+        learning_result = maybe_run_auto_learning()
+        learning_message = ""
+        if learning_result:
+            learning_message = f"\nAuto learning checked. enough_data={learning_result.get('enough_data')}, sample={learning_result.get('total_posts')}"
 
         await update.message.reply_text(
             f"Đã đăng Threads cho post #{post.id} bằng {account['name']}.\n"
-            f"Threads ID: {post.threads_post_id or 'unknown'}{reply_message}"
+            f"Threads ID: {post.threads_post_id or 'unknown'}{reply_message}{learning_message}"
         )
         await _reply_status(update)
 
@@ -1425,6 +1527,7 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def analytics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with _db() as db:
         summary = analytics_summary(db)
+        link_counts = catalog_link_counts(db)
     top = (
         "\n".join(f"{idx}. #{post.post_id} - {post.clicks} clicks - {post.keyword}" for idx, post in enumerate(summary.top_posts, 1))
         if summary.top_posts
@@ -1437,6 +1540,7 @@ Needs link: {summary.needs_link}
 Approved: {summary.approved}
 Posted: {summary.posted}
 Tổng click: {summary.total_clicks}
+Links DB: {link_counts['unique_links']} unique / {link_counts['total_links']} total
 Top 5 bài nhiều click nhất:
 {top}"""
     )
@@ -1463,7 +1567,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("contentdraft", contentdraft))
     app.add_handler(CommandHandler("trends", trends))
     app.add_handler(CommandHandler("trenddrafts", trenddrafts))
+    app.add_handler(CommandHandler("ideadrafts", ideadrafts))
     app.add_handler(CommandHandler("performance", performance))
+    app.add_handler(CommandHandler("learn", learn))
+    app.add_handler(CommandHandler("autolearn", autolearn))
     app.add_handler(CommandHandler("ideas", ideas))
     app.add_handler(CommandHandler("accounts", accounts))
     app.add_handler(CommandHandler("engagepost", engagepost))

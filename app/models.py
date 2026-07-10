@@ -97,3 +97,11 @@ class TopicMemory(Base):
     product_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     post_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False, default="")

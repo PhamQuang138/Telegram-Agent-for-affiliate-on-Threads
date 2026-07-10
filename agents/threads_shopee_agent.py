@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.schemas import ThreadsDraft, ThreadsDraftRequest
-from app.services.content_engine import generate_affiliate_content, prompt_payload
+from app.services.content_engine import generate_affiliate_content, generate_affiliate_content_from_idea, prompt_payload
 from app.services.threads_repository import analytics_context, previous_similar_posts
 
 PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "threads_shopee_prompt.txt"
@@ -1254,22 +1254,29 @@ def _draft_from_engine_result(result: dict, request: ThreadsDraftRequest) -> Thr
     )
 
 
-def generate_threads_shopee_content(db: Session, request: ThreadsDraftRequest) -> tuple[ThreadsDraft, dict]:
+def generate_threads_shopee_content(db: Session, request: ThreadsDraftRequest, idea_context: dict | None = None) -> tuple[ThreadsDraft, dict]:
     keyword = (request.keyword or request.product_name or "sản phẩm Shopee").strip()
     products = _request_products(request)
     previous_posts_list = previous_similar_posts(db, keyword)
     context = analytics_context(db)
-    local_result = generate_affiliate_content(keyword, products, previous_posts_list, context)
-    payload = prompt_payload(keyword, products, previous_posts_list, context)
+    local_result = (
+        generate_affiliate_content_from_idea(keyword, products, idea_context, previous_posts_list, context)
+        if idea_context
+        else generate_affiliate_content(keyword, products, previous_posts_list, context)
+    )
+    payload = prompt_payload(keyword, products, previous_posts_list, context, idea_context=idea_context)
     prompt = (
         AFFILIATE_ENGINE_PROMPT_PATH.read_text(encoding="utf-8")
         .replace("{keyword}", payload["keyword"])
         .replace("{products_json}", payload["products_json"])
         .replace("{previous_posts}", payload["previous_posts"])
         .replace("{analytics_context}", payload["analytics_context"])
+        .replace("{learning_context}", payload["learning_context"])
         .replace("{target_platform}", payload["target_platform"])
         + "\n\nLOCAL PLAN TO FOLLOW, NOT COPY VERBATIM:\n"
         + json.dumps(payload["local_plan"], ensure_ascii=False)
+        + "\n\nIDEA SEED TO USE AS DIRECTION:\n"
+        + payload["idea_context"]
         + "\n\n"
         + SHARED_CREATOR_DIRECTION
     )

@@ -4,6 +4,7 @@ import os
 from itertools import count
 
 from app.config import get_settings
+from app.services.learning_engine import load_learned_weights
 
 _ROUND_ROBIN = count()
 
@@ -100,15 +101,22 @@ def select_account_for_post(post: dict, accounts: list[dict]) -> dict:
             post.get("content"),
         ]
     ).lower()
+    weights = load_learned_weights().get("accounts", {})
 
     scored: list[tuple[int, dict]] = []
     for account in valid:
-        score = 0
+        score = 1.0
         persona = str(account.get("persona") or "").lower()
         topics = [str(topic).lower() for topic in account.get("topics", [])]
         if persona and persona in text:
             score += 6
         score += sum(3 for topic in topics if topic and topic in text)
+        score *= float(weights.get(account.get("name"), 1.0))
+        recent_posts = post.get("recent_posts") or []
+        if len(valid) > 1 and recent_posts:
+            account_ratio = sum(1 for item in recent_posts[:10] if item.get("posted_account_name") == account.get("name")) / max(1, min(10, len(recent_posts)))
+            if account_ratio > 0.70:
+                score *= 0.4
         scored.append((score, account))
 
     best_score = max(score for score, _account_item in scored)

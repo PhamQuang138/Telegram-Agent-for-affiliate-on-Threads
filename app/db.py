@@ -26,6 +26,7 @@ def init_db() -> None:
     if get_settings().database_url.startswith("sqlite"):
         _migrate_threads_posts_columns()
         _migrate_topic_memory_table()
+        _migrate_app_settings_table()
         _allow_duplicate_post_link_affiliate_urls()
 
 
@@ -79,6 +80,19 @@ def _migrate_topic_memory_table() -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_topic_memory_created_at ON topic_memory (created_at)"
+        )
+
+
+def _migrate_app_settings_table() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT NOT NULL PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
         )
 
 

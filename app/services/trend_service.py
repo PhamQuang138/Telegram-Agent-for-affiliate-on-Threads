@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import ClickLog, ThreadsPost, ThreadsPostLink, TrendSnapshot
+from app.services.learning_engine import load_learned_weights
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +353,7 @@ def _snapshot_to_dict(snapshot: TrendSnapshot) -> dict:
 
 
 def _merge_signals(signals: Iterable[TrendSignal]) -> list[dict]:
+    topic_weights = load_learned_weights().get("topics", {})
     by_keyword: dict[str, dict] = defaultdict(lambda: {"scores": {}, "reasons": [], "matched": 0})
     for signal in signals:
         keyword = _clean_keyword(signal.keyword)
@@ -371,10 +373,12 @@ def _merge_signals(signals: Iterable[TrendSignal]) -> list[dict]:
         }
         total_weight = sum(active_weights.values()) or 1
         score = sum(bucket["scores"][source] * weight for source, weight in active_weights.items()) / total_weight
+        topic_weight = float(topic_weights.get(keyword, 1.0))
+        final_score = min(100, score * (0.8 + 0.2 * topic_weight))
         items.append(
             {
                 "keyword": keyword,
-                "trend_score": round(min(100, score), 1),
+                "trend_score": round(final_score, 1),
                 "sources": sorted(bucket["scores"].keys()),
                 "reason": "; ".join(dict.fromkeys(bucket["reasons"]))[:240],
                 "matched_products_count": int(bucket["matched"]),

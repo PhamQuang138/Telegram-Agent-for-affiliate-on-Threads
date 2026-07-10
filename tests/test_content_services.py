@@ -1,15 +1,21 @@
 from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.models import Base, ThreadsPost
 from app.services.angle_library import select_angle
+import app.services.angle_library as angle_library
 from app.services.content_diversity import should_reduce_repetition
-from app.services.content_engine import generate_affiliate_content, generate_content_ideas
+from app.services.content_engine import generate_affiliate_content, generate_affiliate_content_from_idea, generate_content_ideas
 from app.services.content_quality import evaluate_content
 from app.services.content_similarity import is_too_similar
 from app.services.hook_library import choose_hook, load_hooks
+import app.services.hook_library as hook_library
 from app.services.persona_library import select_persona
+import app.services.persona_library as persona_library
 from app.services.product_scoring import score_products
 from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
 from app.services.trend_service import GoogleSuggestProvider
+from app.services import learning_engine
 from agents.threads_shopee_agent import _openrouter_reset_at, _soft_parse_json
 
 
@@ -85,6 +91,18 @@ def test_libraries_select_reasonable_items() -> None:
     assert angle["id"]
 
 
+def test_libraries_use_learned_weights(monkeypatch) -> None:
+    monkeypatch.setattr(persona_library, "load_learned_weights", lambda: {"personas": {"style_basic": 1.8}})
+    monkeypatch.setattr(angle_library, "load_learned_weights", lambda: {"angles": {"wishlist_reason": 1.8}})
+    monkeypatch.setattr(hook_library, "load_learned_weights", lambda: {"hook_types": {"question": 1.8}})
+    persona = select_persona("áo khoác", {"product_name": "áo khoác basic"})
+    angle = select_angle("áo khoác", {"product_name": "áo khoác basic"}, persona)
+    hook = choose_hook("question")
+    assert persona["id"] == "style_basic"
+    assert angle["id"] in {"wishlist_reason", "seasonal_context"}
+    assert hook["hook_type"] == "question"
+
+
 def test_content_diversity_rejects_repeated_key() -> None:
     candidate = {"diversity_key": "a|b|c|d"}
     recent = [{"diversity_key": "a|b|c|d"} for _ in range(5)] + [{"diversity_key": "x"} for _ in range(5)]
@@ -96,6 +114,26 @@ def test_generate_content_ideas() -> None:
     ideas = generate_content_ideas("quạt mini", [{"product_name": "Quạt mini để bàn"}], {}, count=2)
     assert len(ideas) == 2
     assert ideas[0]["idea"]
+
+
+def test_generate_content_from_idea_uses_seed() -> None:
+    idea = {
+        "keyword": "quạt mini",
+        "need": "ngồi bàn làm việc nóng bí",
+        "persona": "Dân văn phòng tối giản",
+        "angle": "đồ nhỏ để bàn",
+        "hook": "Có ai ngồi làm việc mà nóng tới mức mất mood không...",
+        "idea": "Có ai ngồi làm việc mà nóng tới mức mất mood không? Một món nhỏ để bàn đôi khi không cứu cả mùa hè, nhưng cứu được vài giờ tập trung.",
+    }
+    result = generate_affiliate_content_from_idea(
+        "quạt mini",
+        [{"product_name": "Quạt mini để bàn"}],
+        idea,
+        [],
+        {},
+    )
+    assert "nóng" in result["content"].lower()
+    assert result["need"] == idea["need"]
 
 
 def test_soft_parser_extracts_content_from_partial_engine_json() -> None:
@@ -137,6 +175,8 @@ def test_sqlite_post_migration_is_idempotent(monkeypatch) -> None:
     db_module._migrate_threads_posts_columns()
     db_module._migrate_topic_memory_table()
     db_module._migrate_topic_memory_table()
+    db_module._migrate_app_settings_table()
+    db_module._migrate_app_settings_table()
 
     with engine.begin() as connection:
         columns = {
@@ -153,6 +193,7 @@ def test_sqlite_post_migration_is_idempotent(monkeypatch) -> None:
             for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").mappings().all()
         }
     assert "topic_memory" in tables
+    assert "app_settings" in tables
 
 
 def test_google_suggest_provider_uses_mocked_request(monkeypatch) -> None:
@@ -194,3 +235,81 @@ def test_threads_accounts_named_config(monkeypatch) -> None:
 def test_openrouter_reset_at_parses_milliseconds() -> None:
     raw = '{"error":{"metadata":{"headers":{"X-RateLimit-Reset":"1783641600000"}}}}'
     assert _openrouter_reset_at(raw) == 1783641600
+
+
+def test_learning_profile_and_weights_update(monkeypatch, tmp_path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(learning_engine, "SessionLocal", Session)
+    monkeypatch.setattr(learning_engine, "WEIGHTS_PATH", tmp_path / "learned_weights.json")
+
+    with Session() as db:
+        for index in range(12):
+            db.add(
+                ThreadsPost(
+                    keyword="quạt mini" if index < 8 else "áo khoác",
+                    product_name="p",
+                    content="content",
+                    cta="",
+                    hashtags="[]",
+                    status="posted",
+                    quality_score=80,
+                    persona_id="office_minimal" if index < 8 else "style_basic",
+                    persona="office_minimal" if index < 8 else "style_basic",
+                    angle_id="problem_solution" if index < 8 else "wishlist_reason",
+                    angle="problem_solution" if index < 8 else "wishlist_reason",
+                    hook_type="observation" if index < 8 else "question",
+                    click_count=2 if index < 8 else 0,
+                    posted_account_name="acc1" if index < 8 else "acc2",
+                )
+            )
+        db.commit()
+
+    profile = learning_engine.build_learning_profile(min_posts=10)
+    assert profile["enough_data"]
+    assert profile["top_personas"][0]["name"] == "office_minimal"
+    assert profile["weak_personas"][0]["name"] == "style_basic"
+
+    updated = learning_engine.update_learned_weights(min_posts=10)
+    weights = updated["learned_weights"]
+    assert weights["personas"]["office_minimal"] > 1.0
+    assert weights["personas"]["style_basic"] < 1.0
+    assert 0.5 <= weights["personas"]["style_basic"] <= 1.8
+
+
+def test_learning_profile_not_enough_data(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(learning_engine, "SessionLocal", Session)
+    assert not learning_engine.build_learning_profile(min_posts=10)["enough_data"]
+
+
+def test_autolearn_gate_waits_six_hours(monkeypatch, tmp_path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(learning_engine, "SessionLocal", Session)
+    monkeypatch.setattr(learning_engine, "WEIGHTS_PATH", tmp_path / "learned_weights.json")
+    learning_engine.set_app_setting(learning_engine.SETTING_AUTO_LEARNING, "on")
+    learning_engine.set_app_setting(learning_engine.SETTING_LAST_LEARNING_RUN, learning_engine.datetime.now(learning_engine.timezone.utc).isoformat())
+    with Session() as db:
+        for index in range(10):
+            db.add(
+                ThreadsPost(
+                    keyword="quạt mini",
+                    product_name="p",
+                    content="content",
+                    cta="",
+                    hashtags="[]",
+                    status="posted",
+                    quality_score=80,
+                    persona_id="office_minimal",
+                    angle_id="problem_solution",
+                    hook_type="observation",
+                    click_count=1,
+                )
+            )
+        db.commit()
+    assert learning_engine.maybe_run_auto_learning() is None
