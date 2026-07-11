@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.models import Base, AffiliateProduct, DailyLinkEntry, DemandOpportunity, ThreadsDemandAction, ThreadsDemandOpportunity, ThreadsPost, ThreadsPostLink, ThreadsPostMetric, ThreadsReply
 from app.services.angle_library import select_angle
@@ -159,7 +160,11 @@ def test_soft_parser_extracts_content_from_partial_engine_json() -> None:
 def test_sqlite_post_migration_is_idempotent(monkeypatch) -> None:
     import app.db as db_module
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     with engine.begin() as connection:
         connection.exec_driver_sql(
             """
@@ -856,10 +861,40 @@ def test_telegram_webhook_accepts_valid_secret(monkeypatch) -> None:
         seen["payload"] = payload
 
     monkeypatch.setattr(api_module, "process_telegram_update", fake_process)
+    monkeypatch.setattr(api_module, "claim_telegram_update", lambda update_id: True)
     client = TestClient(api_module.app)
     response = client.post("/api/telegram/webhook", json={"update_id": 1}, headers={"X-Telegram-Bot-Api-Secret-Token": "secret"})
     assert response.status_code == 200
     assert seen["payload"]["update_id"] == 1
+
+
+def test_telegram_webhook_skips_duplicate_update(monkeypatch) -> None:
+    import app.api as api_module
+    import app.config as config_module
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(api_module, "SessionLocal", Session)
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "")
+    config_module.get_settings.cache_clear()
+    calls = {"count": 0}
+
+    async def fake_process(payload):
+        calls["count"] += 1
+
+    monkeypatch.setattr(api_module, "process_telegram_update", fake_process)
+    client = TestClient(api_module.app)
+    first = client.post("/api/telegram/webhook", json={"update_id": 123})
+    second = client.post("/api/telegram/webhook", json={"update_id": 123})
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["duplicate"]
+    assert calls["count"] == 1
 
 
 def test_cleanup_cron_requires_secret(monkeypatch) -> None:

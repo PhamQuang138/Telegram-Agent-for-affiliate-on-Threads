@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from telegram import Update
 from telegram.ext import Application
@@ -12,6 +13,7 @@ from telegram.ext import Application
 from app.db import get_db, init_db
 from app.config import get_settings
 from app.db import SessionLocal
+from app.models import AppSetting
 from app.services.daily_link_cleanup import cleanup_expired_daily_links
 from app.services.threads_repository import get_post_by_slug, get_post_link_by_slug, log_click
 from app.telegram_bot import build_application
@@ -71,6 +73,22 @@ async def process_telegram_update(payload: dict) -> None:
     await application.process_update(update)
 
 
+def claim_telegram_update(update_id: int | None) -> bool:
+    if update_id is None:
+        return True
+    key = f"telegram_update:{update_id}"
+    with SessionLocal() as db:
+        if db.get(AppSetting, key):
+            return False
+        db.add(AppSetting(key=key, value="processing", updated_at=""))
+        try:
+            db.commit()
+            return True
+        except IntegrityError:
+            db.rollback()
+            return False
+
+
 @app.post("/api/telegram/webhook")
 async def telegram_webhook(
     request: Request,
@@ -84,6 +102,9 @@ async def telegram_webhook(
         payload = await request.json()
     except JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+    update_id = payload.get("update_id")
+    if not claim_telegram_update(int(update_id) if isinstance(update_id, int) else None):
+        return {"ok": True, "duplicate": True}
     try:
         await process_telegram_update(payload)
     except Exception as exc:
