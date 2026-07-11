@@ -2378,6 +2378,24 @@ def _parse_importdaily_args(text: str) -> tuple[str, str | None, str | None]:
     return path, raw_date, link_type_id
 
 
+def _parse_importdaily_upload_caption(text: str | None) -> tuple[str | None, str | None]:
+    raw = (text or "").partition(" ")[2].strip()
+    if not raw:
+        return None, None
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        parts = raw.split()
+    raw_date = None
+    link_type_id = None
+    for token in parts:
+        if token in valid_link_type_ids():
+            link_type_id = token
+        elif not raw_date:
+            raw_date = token
+    return raw_date, link_type_id
+
+
 def _looks_like_local_path(path: str) -> bool:
     return bool(path) and (
         re.match(r"^[A-Za-z]:[\\/]", path) is not None
@@ -2484,7 +2502,7 @@ async def importdaily_document(update: Update, context: ContextTypes.DEFAULT_TYP
     raw_date = None
     link_type_id = None
     if message.caption and message.caption.strip().startswith("/importdaily"):
-        _, raw_date, link_type_id = _parse_importdaily_args(message.caption)
+        raw_date, link_type_id = _parse_importdaily_upload_caption(message.caption)
         if link_type_id and link_type_id not in valid_link_type_ids():
             await message.reply_text("link_type khong hop le. Dung /linktypes de xem danh sach.")
             return

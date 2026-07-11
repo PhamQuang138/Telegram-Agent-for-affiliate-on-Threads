@@ -1043,7 +1043,7 @@ def test_main_local_polling_still_runs(monkeypatch) -> None:
 
 
 def test_importdaily_parser_keeps_quoted_windows_path() -> None:
-    from app.telegram_bot import _parse_importdaily_args
+    from app.telegram_bot import _parse_importdaily_args, _parse_importdaily_upload_caption
 
     path, import_date, link_type_id = _parse_importdaily_args(
         '/importdaily "C:\\Users\\duyqu\\Downloads\\Lay link san pham hang loat20260711160341-test.csv" 2026-07-11 xtra_commission'
@@ -1051,3 +1051,6 @@ def test_importdaily_parser_keeps_quoted_windows_path() -> None:
     assert path == "C:\\Users\\duyqu\\Downloads\\Lay link san pham hang loat20260711160341-test.csv"
     assert import_date == "2026-07-11"
     assert link_type_id == "xtra_commission"
+    upload_date, upload_type = _parse_importdaily_upload_caption("/importdaily today xtra_commission")
+    assert upload_date == "today"
+    assert upload_type == "xtra_commission"
