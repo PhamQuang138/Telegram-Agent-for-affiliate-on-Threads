@@ -319,7 +319,7 @@ product_commission  Hoa hong San pham
 exclusive_offer     Uu dai doc quyen
 ```
 
-Admin workflow:
+Admin workflow. Recommended: run this in private chat with the bot so affiliate links are not exposed in the group.
 
 ```text
 /linkbatch
@@ -331,7 +331,7 @@ https://s.shopee.vn/...
 /endlinkbatch
 ```
 
-After `/endlinkbatch`, the bot posts a guide message to the group when the batch contains at least one link.
+After `/endlinkbatch`, the bot posts a guide message to `TELEGRAM_COMMUNITY_GROUP_ID` when the batch contains at least one link. Admin can still run the batch inside the group, but private chat is cleaner because members should receive links through bot DM.
 
 Member workflow:
 

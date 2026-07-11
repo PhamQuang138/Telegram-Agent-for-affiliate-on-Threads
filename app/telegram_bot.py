@@ -2393,6 +2393,14 @@ def _admin_group_required(update: Update) -> bool:
     return _admin_required(update) and _group_required(update)
 
 
+def _batch_storage_group_id(update: Update) -> str | int | None:
+    chat = update.effective_chat
+    if chat and is_configured_group(chat.id):
+        return chat.id
+    configured = get_settings().telegram_community_group_id.strip()
+    return configured or None
+
+
 def _admin_group_denied_text(update: Update) -> str:
     user = update.effective_user
     chat = update.effective_chat
@@ -2557,8 +2565,11 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def linkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _admin_group_required(update):
+    if not _admin_required(update):
         await update.message.reply_text(_admin_group_denied_text(update))
+        return
+    if not _batch_storage_group_id(update):
+        await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID de dang guide sau batch.")
         return
     with _db() as db:
         cleanup_expired_admin_links(db)
@@ -2604,8 +2615,12 @@ async def choose_batch_category(update: Update, context: ContextTypes.DEFAULT_TY
     if not link_type_id or category_id not in valid_category_ids():
         await query.message.reply_text("Loai link hoac danh muc khong hop le.")
         return
+    target_group = get_settings().telegram_community_group_id.strip() if not is_configured_group(query.message.chat_id) else query.message.chat_id
+    if not target_group:
+        await query.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
+        return
     with _db() as db:
-        batch = admin_start_batch(db, query.from_user.id, query.message.chat_id, link_type_id, category_id)
+        batch = admin_start_batch(db, query.from_user.id, target_group, link_type_id, category_id)
     await query.edit_message_text(
         "Da bat dau dot nhap:\n"
         f"Loai: {link_type_name(batch.link_type_id)}\n"
@@ -2621,13 +2636,16 @@ async def ingest_admin_link_message(update: Update, context: ContextTypes.DEFAUL
     chat = update.effective_chat
     if not message or not user or not chat:
         return
-    if not is_configured_group(chat.id) or not is_link_admin(user.id):
+    if not is_link_admin(user.id):
         return
     text = message.text or ""
     if not text or text.startswith("/"):
         return
+    target_group = chat.id if is_configured_group(chat.id) else get_settings().telegram_community_group_id.strip()
+    if not target_group:
+        return
     with _db() as db:
-        result = ingest_admin_message(db, user.id, chat.id, text)
+        result = ingest_admin_message(db, user.id, target_group, text)
     if not result.batch or result.added <= 0:
         return
     await message.reply_text(
@@ -2638,11 +2656,15 @@ async def ingest_admin_link_message(update: Update, context: ContextTypes.DEFAUL
 
 
 async def endlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _admin_group_required(update):
+    if not _admin_required(update):
         await update.message.reply_text(_admin_group_denied_text(update))
         return
+    target_group = _batch_storage_group_id(update)
+    if not target_group:
+        await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
+        return
     with _db() as db:
-        batch = admin_close_batch(db, update.effective_user.id, update.effective_chat.id, "completed")
+        batch = admin_close_batch(db, update.effective_user.id, target_group, "completed")
         cleanup_expired_admin_links(db)
     if not batch:
         await update.message.reply_text("Khong co batch active.")
@@ -2650,7 +2672,7 @@ async def endlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"Da ket thuc batch #{batch.id}. Link da luu: {batch.link_count}")
     if batch.link_count and get_settings().send_guide_after_batch:
         sent = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+            chat_id=target_group,
             text=_guide_text(),
             reply_markup=_guide_keyboard(),
             disable_web_page_preview=True,
@@ -2660,20 +2682,28 @@ async def endlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cancellinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _admin_group_required(update):
+    if not _admin_required(update):
         await update.message.reply_text(_admin_group_denied_text(update))
         return
+    target_group = _batch_storage_group_id(update)
+    if not target_group:
+        await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
+        return
     with _db() as db:
-        batch = admin_close_batch(db, update.effective_user.id, update.effective_chat.id, "cancelled")
+        batch = admin_close_batch(db, update.effective_user.id, target_group, "cancelled")
     await update.message.reply_text("Da huy batch." if batch else "Khong co batch active.")
 
 
 async def currentlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _admin_group_required(update):
+    if not _admin_required(update):
         await update.message.reply_text(_admin_group_denied_text(update))
         return
+    target_group = _batch_storage_group_id(update)
+    if not target_group:
+        await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
+        return
     with _db() as db:
-        batch = admin_active_batch_for_admin(db, update.effective_user.id, update.effective_chat.id)
+        batch = admin_active_batch_for_admin(db, update.effective_user.id, target_group)
     if not batch:
         await update.message.reply_text("Khong co batch active.")
         return
