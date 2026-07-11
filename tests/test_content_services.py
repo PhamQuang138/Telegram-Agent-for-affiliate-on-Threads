@@ -917,3 +917,13 @@ def test_main_local_polling_still_runs(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "build_application", lambda: dummy)
     main_module.main()
     assert dummy.polled
+
+
+def test_importdaily_parser_keeps_quoted_windows_path() -> None:
+    from app.telegram_bot import _parse_importdaily_args
+
+    path, import_date = _parse_importdaily_args(
+        '/importdaily "C:\\Users\\duyqu\\Downloads\\Lay link san pham hang loat20260711160341-test.csv" 2026-07-11'
+    )
+    assert path == "C:\\Users\\duyqu\\Downloads\\Lay link san pham hang loat20260711160341-test.csv"
+    assert import_date == "2026-07-11"

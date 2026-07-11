@@ -1,6 +1,7 @@
 import time
 import json
 import tempfile
+import re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -2326,6 +2327,29 @@ def _telegram_group_target() -> int | str | None:
     return raw or None
 
 
+def _parse_importdaily_args(text: str) -> tuple[str, str | None]:
+    raw = text.partition(" ")[2].strip()
+    if not raw:
+        return "", None
+    if raw[0] in {'"', "'"}:
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        if end > 0:
+            path = raw[1:end].strip()
+            rest = raw[end + 1 :].strip()
+            return path, rest.split()[0] if rest else None
+    parts = raw.split()
+    return parts[0].strip().strip('"').strip("'"), parts[1] if len(parts) >= 2 else None
+
+
+def _looks_like_local_path(path: str) -> bool:
+    return bool(path) and (
+        re.match(r"^[A-Za-z]:[\\/]", path) is not None
+        or path.startswith("\\\\")
+        or path.startswith("/")
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         """POD Bot - Telegram link catalog + Threads engagement
@@ -2371,11 +2395,26 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def importdaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
+    csv_path, raw_date = _parse_importdaily_args(update.message.text if update.message else "")
+    if not csv_path:
         await update.message.reply_text("Dung: /importdaily <csv_path> [YYYY-MM-DD]")
         return
-    csv_path = context.args[0]
-    raw_date = context.args[1] if len(context.args) >= 2 else None
+    csv_path = csv_path.strip().strip('"').strip("'")
+
+    if get_settings().vercel and _looks_like_local_path(csv_path):
+        await update.message.reply_text(
+            "Vercel khong doc duoc duong dan tren may cua ban.\n"
+            "Hay upload truc tiep file CSV vao chat Telegram, bot se import ngay roi xoa file tam.\n"
+            "Neu chay local polling thi lenh path nay van dung duoc."
+        )
+        return
+
+    if _looks_like_local_path(csv_path) and not Path(csv_path).expanduser().exists():
+        await update.message.reply_text(
+            "Khong tim thay file CSV o duong dan nay. Neu bot dang chay tren Vercel, hay upload truc tiep file CSV vao Telegram."
+        )
+        return
+
     await update.message.reply_text("Dang import link vao kho theo ngay...")
     try:
         with _db() as db:

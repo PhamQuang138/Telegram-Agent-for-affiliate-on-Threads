@@ -1,5 +1,7 @@
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from json import JSONDecodeError
+import logging
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
@@ -16,6 +18,7 @@ from app.telegram_bot import build_application
 
 app = FastAPI(title="POD Bot Tracking API")
 _telegram_application: Application | None = None
+logger = logging.getLogger(__name__)
 
 
 class DemandIntakeBody(BaseModel):
@@ -81,7 +84,11 @@ async def telegram_webhook(
         payload = await request.json()
     except JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
-    await process_telegram_update(payload)
+    try:
+        await process_telegram_update(payload)
+    except Exception as exc:
+        logger.exception("Telegram webhook update processing failed")
+        return {"ok": False, "processed": False}
     return {"ok": True}
 
 
