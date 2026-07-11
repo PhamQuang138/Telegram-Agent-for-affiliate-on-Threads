@@ -3381,9 +3381,9 @@ def build_application() -> Application:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not found")
 
     init_db()
-    if settings.enable_daily_link_auto_cleanup:
+    if settings.enable_daily_link_auto_cleanup and not settings.vercel:
         cleanup_expired_daily_links(settings.daily_link_retention_days)
-    if settings.enable_daily_link_cleanup:
+    if settings.enable_daily_link_cleanup and not settings.vercel:
         with _db() as db:
             cleanup_expired_admin_links(db)
     if not settings.vercel and settings.enable_csv_daily_import:
