@@ -9,6 +9,7 @@ Threads engagement post
 -> Telegram group CTA reply
 -> Telegram daily link catalog
 -> choose date
+-> choose campaign type
 -> choose category
 -> receive Shopee affiliate links
 ```
@@ -40,8 +41,9 @@ python -m app.main
 
 ## Features
 
-- Maintain a Telegram daily link catalog with date and category menus.
+- Maintain a Telegram daily link catalog with date, campaign type, and category menus.
 - Import and de-duplicate Shopee affiliate CSV files by day.
+- Classify daily affiliate links into campaign type and product category without AI calls.
 - Keep only the latest 4 daily catalog dates by default.
 - Send category link lists into a configured Telegram group.
 - Generate and publish Threads engagement posts.
@@ -107,6 +109,14 @@ TELEGRAM_COMMUNITY_GROUP_ID=
 TELEGRAM_GROUP_INVITE_URL=
 TELEGRAM_GROUP_DISPLAY_NAME=Nhom link uu dai
 TELEGRAM_DAILY_LINK_DISCLOSURE=Cac link tren la link tiep thi lien ket.
+TELEGRAM_DAILY_DISABLE_LINK_PREVIEW=true
+DAILY_LINKS_PER_MESSAGE=5
+DAILY_MAX_PRODUCTS_PER_CATEGORY=20
+DAILY_MAX_PRODUCTS_PER_SEND=10
+DAILY_ENABLE_PAGINATION=true
+DAILY_DEFAULT_LINK_TYPE=shopee_commission
+DAILY_LINK_DEFAULT_TARGET=group
+DAILY_GROUP_SEND_COOLDOWN_SECONDS=30
 DAILY_LINK_RETENTION_DAYS=4
 DAILY_LINK_TIMEZONE=Asia/Bangkok
 DAILY_LINK_DELETE_ORPHAN_PRODUCTS=true
@@ -255,14 +265,17 @@ GET /api/cron/cleanup-daily-links
 /linkdates
 /dealhomnay
 
-/importdaily <csv_path> [date]
-/adddailylink <url> | <name> | <price>
+/importdaily <csv_path> [date] [link_type]
+/adddailylink <url> | <name> | <price> | <link_type>
 /adddailytext
+/linktypes
 /dailystats [date]
 /recategorize <link_id> <category_id>
+/retype <link_id> <link_type_id>
+/viewproduct <link_id>
 /deactivatedaily <link_id>
 /activatedaily <link_id>
-/senddaily <date> <category_id>
+/senddaily <date> <link_type_id> <category_id> [group|channel]
 /sendtoday
 /cleanuppreview
 /cleanupdaily
@@ -282,6 +295,29 @@ Frozen commands return a short frozen-feature message instead of running the old
 
 ## Daily Link Catalog
 
+Daily Link Catalog is deterministic and rule-based. It does not call OpenRouter, Gemini, OpenAI, or any AI provider during CSV import, link type classification, category classification, menu rendering, stats, cleanup, or Telegram group sending. AI is only used by Threads content workflows.
+
+The catalog has two levels:
+
+```text
+Campaign type -> Product category
+```
+
+Supported campaign types:
+
+```text
+shopee_commission   Hoa hong Shopee
+xtra_commission     Hoa hong Xtra
+product_commission  Hoa hong San pham
+exclusive_offer     Uu dai doc quyen
+```
+
+Show type IDs:
+
+```text
+/linktypes
+```
+
 Import links for today:
 
 ```text
@@ -294,10 +330,18 @@ Import links for a specific date:
 /importdaily shopee.csv 2026-07-11
 ```
 
+Import with a default campaign type:
+
+```text
+/importdaily shopee.csv today xtra_commission
+```
+
+Row-level campaign type columns still win over the default. Supported columns include `Loai hoa hong`, `Loai chien dich`, `Nhom chien dich`, `Ten chien dich`, `Campaign Type`, `Commission Type`, `Loai uu dai`, `Nguon link`, and `Danh muc link`.
+
 Add one link manually:
 
 ```text
-/adddailylink https://s.shopee.vn/xxx | Quat mini de ban | 79000
+/adddailylink https://s.shopee.vn/xxx | Quat mini de ban | 79000 | xtra_commission
 ```
 
 Show the public menu:
@@ -308,7 +352,21 @@ Show the public menu:
 /dealhomnay
 ```
 
-The bot shows up to 4 recent dates, then category buttons with counts. When a category is selected, the bot sends that category's affiliate links to `TELEGRAM_COMMUNITY_GROUP_ID`.
+The bot shows up to 4 recent dates, then campaign type buttons, then category buttons with counts. When a category is selected, the bot sends a small paginated batch to `TELEGRAM_COMMUNITY_GROUP_ID`.
+
+Manual fixes:
+
+```text
+/retype <product_id> <link_type_id>
+/recategorize <product_id> <category_id>
+/viewproduct <product_id>
+```
+
+Admin send requires both type and category:
+
+```text
+/senddaily 2026-07-11 xtra_commission home group
+```
 
 Cleanup runs on startup and after daily imports/adds when `ENABLE_DAILY_LINK_AUTO_CLEANUP=true`.
 

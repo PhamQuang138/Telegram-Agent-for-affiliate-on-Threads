@@ -122,8 +122,10 @@ class AffiliateProduct(Base):
     product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     price: Mapped[str | None] = mapped_column(String(64), nullable=True)
     shop_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    link_type_id: Mapped[str] = mapped_column(String(64), nullable=False, default="shopee_commission", index=True)
     category_id: Mapped[str] = mapped_column(String(64), nullable=False, default="other", index=True)
     subcategory: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    subcategory_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -151,6 +153,8 @@ class AffiliateImportBatch(Base):
     imported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    type_stats_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    category_stats_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

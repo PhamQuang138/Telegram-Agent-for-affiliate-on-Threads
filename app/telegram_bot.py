@@ -2,6 +2,7 @@ import time
 import json
 import tempfile
 import re
+import shlex
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ from agents.threads_shopee_agent import (
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import AppSetting, DemandOpportunity, ThreadsPost, ThreadsPostMetric, ThreadsReply
+from app.models import AffiliateProduct, DailyLinkEntry
 from app.schemas import ThreadsDraftRequest
 from app.services.shopee_csv_importer import import_shopee_csv, scan_shopee_csv
 from app.services.content_engine import generate_content_ideas
@@ -77,19 +79,39 @@ from app.services.topic_memory import is_topic_recently_used, record_topic_usage
 from app.services.feature_flags import feature_snapshot, is_feature_enabled
 from app.services.daily_link_catalog import (
     add_daily_product,
-    build_category_message,
-    category_counts,
     daily_stats as daily_catalog_stats,
     display_date,
     import_daily_csv,
     parse_import_date,
-    products_for_category,
     recent_dates,
     recategorize_product,
     set_daily_product_active,
     short_display_date,
 )
 from app.services.daily_link_cleanup import cleanup_expired_daily_links
+from app.services.daily_link_repository import (
+    get_categories_for_date_and_type,
+    get_link_types_for_date,
+    get_products_for_date_type_category,
+    update_product_link_type,
+)
+from app.services.affiliate_link_type_classifier import (
+    link_type_name,
+    load_link_types,
+    valid_link_type_ids,
+)
+from app.services.product_category_classifier import category_label, valid_category_ids
+from app.services.telegram_daily_link_ui import (
+    build_product_messages,
+    category_keyboard,
+    compact_date,
+    expand_date,
+    link_type_keyboard,
+    pagination_keyboard,
+    parse_category_callback,
+    parse_page_callback,
+    parse_type_callback,
+)
 from app.services.telegram_cta_generator import generate_telegram_cta
 from app.services.manual_demand_intake import create_manual_demand, import_demands_csv
 from app.services.demand_opportunity_service import (
@@ -2327,19 +2349,33 @@ def _telegram_group_target() -> int | str | None:
     return raw or None
 
 
-def _parse_importdaily_args(text: str) -> tuple[str, str | None]:
+def _parse_importdaily_args(text: str) -> tuple[str, str | None, str | None]:
     raw = text.partition(" ")[2].strip()
     if not raw:
-        return "", None
+        return "", None, None
     if raw[0] in {'"', "'"}:
         quote = raw[0]
         end = raw.find(quote, 1)
         if end > 0:
-            path = raw[1:end].strip()
-            rest = raw[end + 1 :].strip()
-            return path, rest.split()[0] if rest else None
-    parts = raw.split()
-    return parts[0].strip().strip('"').strip("'"), parts[1] if len(parts) >= 2 else None
+            parts = [raw[1:end].strip(), *raw[end + 1 :].strip().split()]
+        else:
+            parts = raw.split()
+    else:
+        try:
+            parts = shlex.split(raw)
+        except ValueError:
+            parts = raw.split()
+    if not parts:
+        return "", None, None
+    path = parts[0].strip().strip('"').strip("'")
+    raw_date = None
+    link_type_id = None
+    for token in parts[1:]:
+        if token in valid_link_type_ids():
+            link_type_id = token
+        elif not raw_date:
+            raw_date = token
+    return path, raw_date, link_type_id
 
 
 def _looks_like_local_path(path: str) -> bool:
@@ -2360,9 +2396,10 @@ Kho link:
 /dealhomnay
 
 Admin import:
-/importdaily <csv_path> [date]
-/adddailylink <url> | <name> | <price>
+/importdaily <csv_path> [date] [link_type]
+/adddailylink <url> | <name> | <price> | <link_type>
 /adddailytext
+/linktypes
 /dailystats [date]
 /cleanuppreview
 /cleanupdaily
@@ -2395,9 +2432,12 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def importdaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    csv_path, raw_date = _parse_importdaily_args(update.message.text if update.message else "")
+    csv_path, raw_date, link_type_id = _parse_importdaily_args(update.message.text if update.message else "")
     if not csv_path:
-        await update.message.reply_text("Dung: /importdaily <csv_path> [YYYY-MM-DD]")
+        await update.message.reply_text("Dung: /importdaily <csv_path> [YYYY-MM-DD|today] [link_type]")
+        return
+    if link_type_id and link_type_id not in valid_link_type_ids():
+        await update.message.reply_text("link_type khong hop le. Dung /linktypes de xem danh sach.")
         return
     csv_path = csv_path.strip().strip('"').strip("'")
 
@@ -2418,7 +2458,7 @@ async def importdaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("Dang import link vao kho theo ngay...")
     try:
         with _db() as db:
-            result = import_daily_csv(db, csv_path, raw_date)
+            result = import_daily_csv(db, csv_path, raw_date, default_link_type_id=link_type_id)
     except Exception as exc:
         await update.message.reply_text(f"Import daily loi: {exc}")
         return
@@ -2441,6 +2481,13 @@ async def importdaily_document(update: Update, context: ContextTypes.DEFAULT_TYP
     file_name = document.file_name or "daily-links.csv"
     if not file_name.lower().endswith(".csv"):
         return
+    raw_date = None
+    link_type_id = None
+    if message.caption and message.caption.strip().startswith("/importdaily"):
+        _, raw_date, link_type_id = _parse_importdaily_args(message.caption)
+        if link_type_id and link_type_id not in valid_link_type_ids():
+            await message.reply_text("link_type khong hop le. Dung /linktypes de xem danh sach.")
+            return
     await message.reply_text("Da nhan CSV. Dang tai file va import vao kho link...")
     temp_path = ""
     try:
@@ -2450,7 +2497,7 @@ async def importdaily_document(update: Update, context: ContextTypes.DEFAULT_TYP
             temp_path = tmp.name
         await tg_file.download_to_drive(custom_path=temp_path)
         with _db() as db:
-            result = import_daily_csv(db, temp_path)
+            result = import_daily_csv(db, temp_path, raw_date, default_link_type_id=link_type_id)
         cleaned = (result.cleanup or {}).get("entries_deleted", 0)
         await message.reply_text(
             f"Import CSV upload xong.\n"
@@ -2502,12 +2549,23 @@ async def dailystats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Khong doc duoc stats: {exc}")
         return
     lines = [
-        f"Daily catalog {display_date(stats['import_date'])}",
-        f"total_entries: {stats['total_entries']}",
-        f"active_entries: {stats['active_entries']}",
+        f"Ngay {display_date(stats['import_date'])}",
+        f"Tong link: {stats['active_entries']}",
+        "",
     ]
-    for item in stats["categories"]:
-        lines.append(f"- {item['label']}: {item['count']}")
+    for type_item in stats.get("types", []):
+        lines.append(f"{type_item['link_type_name']}: {type_item['count']}")
+        for item in type_item.get("categories", []):
+            lines.append(f"- {item['label']}: {item['count']}")
+        lines.append("")
+    lines.append(f"Khong xac dinh danh muc: {stats.get('unknown_categories', 0)}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def linktypes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lines = ["Loai link co the dung khi import:"]
+    for item in load_link_types():
+        lines.append(f"- {item['name']}: {item['id']}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -2539,7 +2597,7 @@ async def links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Hien chua co link uu dai nao trong 4 ngay gan nhat.")
         return
     buttons = [
-        [InlineKeyboardButton(short_display_date(item), callback_data=f"daily_date:{item}") for item in dates[index : index + 2]]
+        [InlineKeyboardButton(short_display_date(item), callback_data=f"dl:d:{compact_date(item)}") for item in dates[index : index + 2]]
         for index in range(0, len(dates), 2)
     ]
     await update.message.reply_text("Chon ngay cap nhat link:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -2550,20 +2608,50 @@ async def daily_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not query:
         return
     await query.answer()
-    import_date = (query.data or "").split(":", 1)[1]
+    data = query.data or ""
+    if data.startswith("daily_date:"):
+        import_date = data.split(":", 1)[1]
+    else:
+        try:
+            import_date = expand_date(data.split(":", 2)[2])
+        except Exception:
+            await query.message.reply_text("Ngay khong hop le.")
+            return
     try:
         parse_import_date(import_date)
     except ValueError:
         await query.message.reply_text("Ngay khong hop le.")
         return
     with _db() as db:
-        cats = category_counts(db, import_date)
-    if not cats:
+        types = get_link_types_for_date(db, import_date)
+    if not types:
         await query.edit_message_text(f"Ngay {display_date(import_date)} chua co link active.")
         return
-    buttons = [[InlineKeyboardButton(f"{item['label']} ({item['count']})", callback_data=f"daily_cat:{import_date}:{item['category_id']}")] for item in cats]
-    buttons.append([InlineKeyboardButton("<- Chon ngay khac", callback_data="daily_back")])
-    await query.edit_message_text(f"Danh muc ngay {short_display_date(import_date)}:", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text(
+        f"Chon loai link ngay {short_display_date(import_date)}:",
+        reply_markup=link_type_keyboard(import_date, types),
+    )
+
+
+async def daily_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    try:
+        import_date, link_type_id = parse_type_callback(query.data or "")
+    except Exception:
+        await query.message.reply_text("Loai link khong hop le.")
+        return
+    with _db() as db:
+        cats = get_categories_for_date_and_type(db, import_date, link_type_id)
+    if not cats:
+        await query.edit_message_text(f"{link_type_name(link_type_id)} ngay {display_date(import_date)} chua co link active.")
+        return
+    await query.edit_message_text(
+        f"Danh muc - {link_type_name(link_type_id)} - {short_display_date(import_date)}:",
+        reply_markup=category_keyboard(import_date, link_type_id, cats),
+    )
 
 
 async def daily_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2576,7 +2664,7 @@ async def daily_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.edit_message_text("Hien chua co link uu dai nao trong 4 ngay gan nhat.")
             return
         buttons = [
-            [InlineKeyboardButton(short_display_date(item), callback_data=f"daily_date:{item}") for item in dates[index : index + 2]]
+            [InlineKeyboardButton(short_display_date(item), callback_data=f"dl:d:{compact_date(item)}") for item in dates[index : index + 2]]
             for index in range(0, len(dates), 2)
         ]
         await query.edit_message_text("Chon ngay cap nhat link:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -2587,14 +2675,48 @@ async def daily_category_callback(update: Update, context: ContextTypes.DEFAULT_
     if not query:
         return
     await query.answer()
-    parts = (query.data or "").split(":", 2)
-    if len(parts) != 3:
+    try:
+        if (query.data or "").startswith("daily_cat:"):
+            parts = (query.data or "").split(":", 2)
+            import_date, category_id = parts[1], parts[2]
+            link_type_id = "shopee_commission"
+            page = 1
+        else:
+            import_date, link_type_id, category_id = parse_category_callback(query.data or "")
+            page = 1
+    except Exception:
+        await query.message.reply_text("Callback danh muc khong hop le.")
         return
-    import_date, category_id = parts[1], parts[2]
+    await _send_daily_products(update, context, import_date, link_type_id, category_id, page)
+
+
+async def daily_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    try:
+        import_date, link_type_id, category_id, page = parse_page_callback(query.data or "")
+    except Exception:
+        await query.message.reply_text("Trang khong hop le.")
+        return
+    await _send_daily_products(update, context, import_date, link_type_id, category_id, page)
+
+
+async def _send_daily_products(update: Update, context: ContextTypes.DEFAULT_TYPE, import_date: str, link_type_id: str, category_id: str, page: int = 1) -> None:
+    query = update.callback_query
+    if not query:
+        return
     try:
         parse_import_date(import_date)
     except ValueError:
         await query.message.reply_text("Ngay khong hop le.")
+        return
+    if link_type_id not in valid_link_type_ids():
+        await query.message.reply_text("Loai link khong hop le.")
+        return
+    if category_id not in valid_category_ids():
+        await query.message.reply_text("Danh muc khong hop le.")
         return
 
     settings = get_settings()
@@ -2605,7 +2727,7 @@ async def daily_category_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
         return
 
-    key = (query.from_user.id if query.from_user else 0, import_date, category_id, target_chat_id)
+    key = (query.from_user.id if query.from_user else 0, import_date, link_type_id, category_id, page, target_chat_id)
     now = time.time()
     if now - DAILY_SEND_COOLDOWNS.get(key, 0) < settings.daily_group_send_cooldown_seconds:
         await query.message.reply_text("Danh muc nay vua duoc gui vao group, ban xem tin nhan moi nhat nhe.")
@@ -2613,17 +2735,23 @@ async def daily_category_callback(update: Update, context: ContextTypes.DEFAULT_
     DAILY_SEND_COOLDOWNS[key] = now
 
     with _db() as db:
-        products = products_for_category(db, import_date, category_id)
+        page_size = max(1, min(10, settings.daily_max_products_per_send))
+        result = get_products_for_date_type_category(db, import_date, link_type_id, category_id, page=page, page_size=page_size)
+        products = result["products"]
     if not products:
         await query.message.reply_text("Danh muc nay chua co link active.")
         return
-    for message in build_category_message(import_date, category_id, products):
+    for message in build_product_messages(import_date, link_type_id, category_id, products):
         await context.bot.send_message(
             chat_id=target_chat_id,
             text=message,
             disable_web_page_preview=settings.telegram_daily_disable_link_preview,
         )
-    await query.message.reply_text(f"Da gui {len(products)} link vao group.")
+    keyboard = pagination_keyboard(import_date, link_type_id, category_id, result["page"], result["has_next"])
+    await query.message.reply_text(
+        f"Da gui {len(products)} link {category_label(category_id)} / {link_type_name(link_type_id)} vao group.",
+        reply_markup=keyboard,
+    )
 
 
 async def recategorize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2633,6 +2761,43 @@ async def recategorize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     with _db() as db:
         ok = recategorize_product(db, int(context.args[0]), context.args[1])
     await update.message.reply_text("Da doi danh muc." if ok else "Khong tim thay link hoac category khong hop le.")
+
+
+async def retype(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2:
+        await update.message.reply_text("Dung: /retype <product_id> <link_type_id>")
+        return
+    with _db() as db:
+        ok = update_product_link_type(db, int(context.args[0]), context.args[1])
+    await update.message.reply_text("Da doi loai link." if ok else "Khong tim thay link hoac link_type khong hop le.")
+
+
+async def viewproduct(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dung: /viewproduct <product_id>")
+        return
+    with _db() as db:
+        product = db.get(AffiliateProduct, int(context.args[0]))
+        if not product:
+            await update.message.reply_text("Khong tim thay product.")
+            return
+        latest_date = db.scalar(
+            select(DailyLinkEntry.import_date)
+            .where(DailyLinkEntry.product_id == product.id)
+            .order_by(DailyLinkEntry.import_date.desc())
+            .limit(1)
+        )
+        text = (
+            f"Product #{product.id}\n"
+            f"Ten: {product.product_name}\n"
+            f"Loai: {link_type_name(product.link_type_id)} ({product.link_type_id})\n"
+            f"Danh muc: {category_label(product.category_id)} ({product.category_id})\n"
+            f"Gia: {product.price or 'khong co'}\n"
+            f"Shop: {product.shop_name or 'khong co'}\n"
+            f"Ngay gan nhat: {display_date(latest_date) if latest_date else 'chua co'}\n"
+            f"Link: {product.affiliate_url}"
+        )
+    await update.message.reply_text(text, disable_web_page_preview=True)
 
 
 async def deactivatedaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2654,26 +2819,32 @@ async def activatedaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def senddaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if len(context.args) < 2:
-        await update.message.reply_text("Dung: /senddaily <date> <category_id>")
+    if len(context.args) < 3:
+        await update.message.reply_text("Dung: /senddaily <date> <link_type_id> <category_id> [group|channel]")
         return
     try:
         import_date = parse_import_date(context.args[0])
     except ValueError:
         await update.message.reply_text("Ngay phai la YYYY-MM-DD hoac DD/MM/YYYY.")
         return
-    category_id = context.args[1]
+    link_type_id = context.args[1]
+    category_id = context.args[2]
+    if link_type_id not in valid_link_type_ids() or category_id not in valid_category_ids():
+        await update.message.reply_text("link_type hoac category khong hop le. Dung /linktypes de xem link_type.")
+        return
     settings = get_settings()
     target_chat_id = _telegram_group_target()
     if not target_chat_id:
         await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
         return
     with _db() as db:
-        products = products_for_category(db, import_date, category_id)
+        page_size = max(1, min(10, settings.daily_max_products_per_send))
+        result = get_products_for_date_type_category(db, import_date, link_type_id, category_id, page=1, page_size=page_size)
+        products = result["products"]
     if not products:
         await update.message.reply_text("Khong co product active cho ngay/category nay.")
         return
-    for message in build_category_message(import_date, category_id, products):
+    for message in build_product_messages(import_date, link_type_id, category_id, products):
         await context.bot.send_message(
             chat_id=target_chat_id,
             text=message,
@@ -2791,8 +2962,11 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.Document.FileExtension("csv"), importdaily_document))
     app.add_handler(CommandHandler("adddailylink", adddailylink))
     app.add_handler(CommandHandler("adddailytext", adddailytext))
+    app.add_handler(CommandHandler("linktypes", linktypes))
     app.add_handler(CommandHandler("dailystats", dailystats))
     app.add_handler(CommandHandler("recategorize", recategorize))
+    app.add_handler(CommandHandler("retype", retype))
+    app.add_handler(CommandHandler("viewproduct", viewproduct))
     app.add_handler(CommandHandler("deactivatedaily", deactivatedaily))
     app.add_handler(CommandHandler("activatedaily", activatedaily))
     app.add_handler(CommandHandler("senddaily", senddaily))
@@ -2806,6 +2980,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("engagepost", engagepost))
     app.add_handler(CallbackQueryHandler(choose_engagement_persona, pattern=r"^engage_persona:(daily|controversial|advisor)$"))
     app.add_handler(CallbackQueryHandler(choose_engagement_mode, pattern=r"^engage_mode:(viral|advice|ask|quote|observation)$"))
+    app.add_handler(CallbackQueryHandler(daily_date_callback, pattern=r"^dl:d:\d{8}$"))
+    app.add_handler(CallbackQueryHandler(daily_type_callback, pattern=r"^dl:t:\d{8}:(sh|xt|pc|ex)$"))
+    app.add_handler(CallbackQueryHandler(daily_category_callback, pattern=r"^dl:c:\d{8}:(sh|xt|pc|ex):[a-z_]+$"))
+    app.add_handler(CallbackQueryHandler(daily_page_callback, pattern=r"^dl:p:\d{8}:(sh|xt|pc|ex):[a-z_]+:\d+$"))
+    app.add_handler(CallbackQueryHandler(daily_back_callback, pattern=r"^dl:back:dates$"))
     app.add_handler(CallbackQueryHandler(daily_date_callback, pattern=r"^daily_date:\d{4}-\d{2}-\d{2}$"))
     app.add_handler(CallbackQueryHandler(daily_category_callback, pattern=r"^daily_cat:\d{4}-\d{2}-\d{2}:[a-z_]+$"))
     app.add_handler(CallbackQueryHandler(daily_back_callback, pattern=r"^daily_back$"))

@@ -1,11 +1,15 @@
 [
-  {"id": "fashion", "label": "Thoi trang", "keywords": ["ao", "quan", "vay", "dam", "giay", "dep", "tui", "hoodie", "khoac", "jean", "thun", "mac", "outfit"]},
-  {"id": "beauty", "label": "Lam dep", "keywords": ["son", "kem", "serum", "sua rua mat", "duong da", "toc", "makeup", "my pham"]},
-  {"id": "home", "label": "Gia dung", "keywords": ["bep", "nha", "quat", "ke", "hop", "noi", "chao", "den", "lau", "may hut", "do gia dung"]},
-  {"id": "electronics", "label": "Dien tu", "keywords": ["sac", "cap", "tai nghe", "loa", "ban phim", "chuot", "laptop", "dien thoai", "usb", "adapter"]},
-  {"id": "study_office", "label": "Hoc tap van phong", "keywords": ["ban lam viec", "van phong", "but", "vo", "giay", "may in", "muc in", "ghe", "gia do laptop"]},
-  {"id": "sports", "label": "The thao", "keywords": ["bong da", "the thao", "gym", "chay bo", "yoga", "ao da bong", "giay da bong"]},
-  {"id": "food", "label": "Do an", "keywords": ["banh", "keo", "ca phe", "tra", "sua", "do an", "thuc pham", "nuoc"]},
-  {"id": "decor", "label": "Decor", "keywords": ["decor", "trang tri", "tranh", "nen", "tham", "lo hoa", "den ngu"]},
-  {"id": "other", "label": "Khac", "keywords": []}
+  {"id": "fashion", "label": "Thời trang", "aliases": ["thời trang", "fashion", "quần áo"], "keywords": ["ao", "quan", "vay", "dam", "giay", "dep", "tui", "hoodie", "khoac", "jean", "thun", "mac", "outfit", "non", "mu"]},
+  {"id": "beauty", "label": "Làm đẹp", "aliases": ["làm đẹp", "beauty", "mỹ phẩm"], "keywords": ["son", "kem", "serum", "sua rua mat", "duong da", "toc", "makeup", "my pham", "nuoc hoa"]},
+  {"id": "home", "label": "Gia dụng", "aliases": ["gia dụng", "home", "nhà cửa"], "keywords": ["bep", "nha", "quat", "ke", "hop", "noi", "chao", "den", "lau", "may hut", "do gia dung", "binh nuoc", "o cam"]},
+  {"id": "electronics", "label": "Điện tử", "aliases": ["điện tử", "electronics", "phụ kiện số"], "keywords": ["sac", "cap", "tai nghe", "loa", "ban phim", "chuot", "laptop", "dien thoai", "usb", "adapter", "camera"]},
+  {"id": "study_office", "label": "Học tập & Văn phòng", "aliases": ["văn phòng", "học tập", "study office"], "keywords": ["ban lam viec", "van phong", "but", "vo", "giay", "may in", "muc in", "ghe", "gia do laptop", "tai lieu"]},
+  {"id": "sports", "label": "Thể thao", "aliases": ["thể thao", "sports", "đồ tập"], "keywords": ["bong da", "the thao", "gym", "chay bo", "yoga", "ao da bong", "giay da bong", "vot", "tap luyen"]},
+  {"id": "food", "label": "Đồ ăn & Đồ uống", "aliases": ["đồ ăn", "đồ uống", "food"], "keywords": ["banh", "keo", "ca phe", "tra", "sua", "do an", "thuc pham", "nuoc", "my", "gia vi"]},
+  {"id": "decor", "label": "Decor", "aliases": ["decor", "trang trí"], "keywords": ["decor", "trang tri", "tranh", "nen", "tham", "lo hoa", "den ngu", "ke trang tri"]},
+  {"id": "mother_baby", "label": "Mẹ & Bé", "aliases": ["mẹ bé", "me be", "mother baby"], "keywords": ["me va be", "tre em", "em be", "ta bim", "binh sua", "do choi", "xe day"]},
+  {"id": "health", "label": "Sức khỏe", "aliases": ["sức khỏe", "health"], "keywords": ["suc khoe", "vitamin", "khan", "khau trang", "dau goi", "thuoc", "y te", "massage"]},
+  {"id": "automotive", "label": "Xe & Phụ kiện", "aliases": ["xe", "ô tô", "automotive"], "keywords": ["xe may", "o to", "oto", "mu bao hiem", "phu kien xe", "camera hanh trinh", "lop xe"]},
+  {"id": "pets", "label": "Thú cưng", "aliases": ["thú cưng", "pets"], "keywords": ["thu cung", "cho meo", "meo", "cho", "cat", "dog", "pate", "hat cho meo", "cat ve sinh"]},
+  {"id": "other", "label": "Khác", "aliases": ["khác", "other"], "keywords": []}
 ]

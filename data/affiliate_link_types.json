@@ -1,0 +1,46 @@
+[
+  {
+    "id": "shopee_commission",
+    "name": "Hoa hồng Shopee",
+    "short_code": "sh",
+    "aliases": [
+      "hoa hồng shopee",
+      "shopee commission",
+      "hoa hong shopee",
+      "shopee"
+    ]
+  },
+  {
+    "id": "xtra_commission",
+    "name": "Hoa hồng Xtra",
+    "short_code": "xt",
+    "aliases": [
+      "hoa hồng xtra",
+      "xtra",
+      "xtra commission",
+      "hoa hong xtra"
+    ]
+  },
+  {
+    "id": "product_commission",
+    "name": "Hoa hồng Sản phẩm",
+    "short_code": "pc",
+    "aliases": [
+      "hoa hồng sản phẩm",
+      "product commission",
+      "hoa hong san pham",
+      "san pham"
+    ]
+  },
+  {
+    "id": "exclusive_offer",
+    "name": "Ưu đãi độc quyền",
+    "short_code": "ex",
+    "aliases": [
+      "ưu đãi độc quyền",
+      "exclusive offer",
+      "uu dai doc quyen",
+      "doc quyen"
+    ]
+  }
+]

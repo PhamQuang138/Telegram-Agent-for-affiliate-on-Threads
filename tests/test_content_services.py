@@ -17,7 +17,9 @@ import app.services.hook_library as hook_library
 from app.services.persona_library import select_persona
 import app.services.persona_library as persona_library
 from app.services.product_scoring import score_products
-from app.services.daily_link_catalog import build_category_message, category_counts, parse_import_date, resolve_import_date
+from app.services.daily_link_catalog import build_category_message, category_counts, import_daily_csv, parse_import_date, resolve_import_date
+from app.services.daily_link_repository import get_categories_for_date_and_type, get_link_types_for_date, get_products_for_date_type_category
+from app.services.affiliate_link_type_classifier import classify_affiliate_link_type
 from app.services import daily_link_cleanup
 from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
 from app.services.telegram_cta_generator import generate_telegram_cta
@@ -562,6 +564,90 @@ def test_daily_category_message_and_counts_ignore_inactive() -> None:
     assert "https://s.shopee.vn/a" in messages[0]
 
 
+def test_daily_import_classifies_link_type_and_category(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr("app.services.daily_link_catalog.get_settings", lambda: SimpleNamespace(
+        daily_link_timezone="Asia/Bangkok",
+        enable_daily_link_auto_cleanup=False,
+        daily_default_link_type="shopee_commission",
+        daily_max_products_per_category=20,
+        telegram_daily_link_disclosure="Cac link tren la link tiep thi lien ket.",
+        daily_links_per_message=5,
+    ))
+    csv_path = tmp_path / "xtra20260711160405.csv"
+    csv_path.write_text(
+        "Tên sản phẩm,Link ưu đãi,Loại hoa hồng,Danh mục sản phẩm,Giá,Tên cửa hàng\n"
+        "Quạt mini để bàn,https://s.shopee.vn/a,Hoa hồng Xtra,Gia dụng,79000,Shop A\n"
+        "Áo đá bóng nam,https://s.shopee.vn/b,Ưu đãi độc quyền,Thể thao,120000,Shop B\n",
+        encoding="utf-8-sig",
+    )
+    with Session() as db:
+        result = import_daily_csv(db, csv_path)
+        types = get_link_types_for_date(db, "2026-07-11")
+        cats = get_categories_for_date_and_type(db, "2026-07-11", "xtra_commission")
+        products = get_products_for_date_type_category(db, "2026-07-11", "xtra_commission", "home")
+    assert result.new_entries == 2
+    assert {item["link_type_id"] for item in types} == {"xtra_commission", "exclusive_offer"}
+    assert cats[0]["category_id"] == "home"
+    assert products["products"][0].product_name == "Quạt mini để bàn"
+
+
+def test_daily_import_admin_override_and_fallback_type(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr("app.services.daily_link_catalog.get_settings", lambda: SimpleNamespace(
+        daily_link_timezone="Asia/Bangkok",
+        enable_daily_link_auto_cleanup=False,
+        daily_default_link_type="shopee_commission",
+        daily_max_products_per_category=20,
+        telegram_daily_link_disclosure="Cac link tren la link tiep thi lien ket.",
+        daily_links_per_message=5,
+    ))
+    csv_path = tmp_path / "daily.csv"
+    csv_path.write_text(
+        "Product Name,Affiliate Link\n"
+        "Chuột không dây Acer,https://s.shopee.vn/c\n",
+        encoding="utf-8-sig",
+    )
+    with Session() as db:
+        import_daily_csv(db, csv_path, "2026-07-11", default_link_type_id="product_commission")
+        product = db.query(AffiliateProduct).one()
+    assert product.link_type_id == "product_commission"
+    assert product.category_id == "electronics"
+
+
+def test_link_type_alias_without_accents() -> None:
+    classified = classify_affiliate_link_type({"Commission Type": "hoa hong san pham"})
+    assert classified["link_type_id"] == "product_commission"
+
+
+def test_daily_import_thousand_rows_does_not_call_ai(tmp_path, monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr("app.services.daily_link_catalog.get_settings", lambda: SimpleNamespace(
+        daily_link_timezone="Asia/Bangkok",
+        enable_daily_link_auto_cleanup=False,
+        daily_default_link_type="shopee_commission",
+        daily_max_products_per_category=20,
+        telegram_daily_link_disclosure="Cac link tren la link tiep thi lien ket.",
+        daily_links_per_message=5,
+    ))
+    calls = {"ai": 0}
+    monkeypatch.setattr("agents.threads_shopee_agent.generate_threads_shopee_content", lambda *args, **kwargs: calls.__setitem__("ai", calls["ai"] + 1))
+    csv_path = tmp_path / "bulk20260711.csv"
+    rows = ["Tên sản phẩm,Link ưu đãi,Loại chiến dịch"]
+    rows.extend(f"Quạt mini để bàn {index},https://s.shopee.vn/bulk{index},Hoa hồng Shopee" for index in range(1000))
+    csv_path.write_text("\n".join(rows), encoding="utf-8-sig")
+    with Session() as db:
+        result = import_daily_csv(db, csv_path)
+    assert result.new_entries == 1000
+    assert calls["ai"] == 0
+
+
 def test_telegram_cta_contains_group_url_and_avoids_recent() -> None:
     group_url = "https://t.me/example_group"
     recent = [generate_telegram_cta({}, group_url, [])]
@@ -959,8 +1045,9 @@ def test_main_local_polling_still_runs(monkeypatch) -> None:
 def test_importdaily_parser_keeps_quoted_windows_path() -> None:
     from app.telegram_bot import _parse_importdaily_args
 
-    path, import_date = _parse_importdaily_args(
-        '/importdaily "C:\\Users\\duyqu\\Downloads\\Lay link san pham hang loat20260711160341-test.csv" 2026-07-11'
+    path, import_date, link_type_id = _parse_importdaily_args(
+        '/importdaily "C:\\Users\\duyqu\\Downloads\\Lay link san pham hang loat20260711160341-test.csv" 2026-07-11 xtra_commission'
     )
     assert path == "C:\\Users\\duyqu\\Downloads\\Lay link san pham hang loat20260711160341-test.csv"
     assert import_date == "2026-07-11"
+    assert link_type_id == "xtra_commission"

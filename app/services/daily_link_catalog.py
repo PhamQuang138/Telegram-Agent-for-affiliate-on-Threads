@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import json
 import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -15,6 +14,17 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import AffiliateImportBatch, AffiliateProduct, DailyLinkEntry
+from app.services.affiliate_link_type_classifier import (
+    classify_affiliate_link_type,
+    link_type_name,
+    valid_link_type_ids,
+)
+from app.services.product_category_classifier import (
+    category_label,
+    classify_product_category,
+    load_categories,
+    valid_category_ids,
+)
 
 CATEGORIES_PATH = Path(__file__).resolve().parents[2] / "data" / "product_categories.json"
 
@@ -39,6 +49,8 @@ def parse_import_date(value: str | None = None) -> str:
     if not value:
         return today_local().isoformat()
     raw = value.strip()
+    if raw.lower() in {"today", "hom nay", "hôm nay"}:
+        return today_local().isoformat()
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(raw, fmt).date().isoformat()
@@ -89,41 +101,37 @@ def short_display_date(value: str) -> str:
 
 def load_categories() -> list[dict]:
     if not CATEGORIES_PATH.exists():
-        return [{"id": "other", "label": "Khac", "keywords": []}]
+        return [{"id": "other", "label": "Khác", "keywords": []}]
     return json.loads(CATEGORIES_PATH.read_text(encoding="utf-8"))
 
 
 def category_label(category_id: str) -> str:
-    for category in load_categories():
-        if category["id"] == category_id:
-            return category.get("label") or category_id
-    return category_id
+    from app.services.product_category_classifier import category_label as _category_label
+
+    return _category_label(category_id)
 
 
 def classify_product(name: str, shop_name: str = "") -> str:
-    haystack = _normalize(f"{name} {shop_name}")
-    best_id = "other"
-    best_score = 0
-    for category in load_categories():
-        score = 0
-        for keyword in category.get("keywords", []):
-            normalized = _normalize(keyword)
-            if normalized and normalized in haystack:
-                score += 2 if " " in normalized else 1
-        if score > best_score:
-            best_id = category["id"]
-            best_score = score
-    return best_id
+    return classify_product_category({}, name, shop_name)["category_id"]
 
 
-def import_daily_csv(db: Session, csv_path: str | Path, import_date: str | None = None) -> DailyImportResult:
+def import_daily_csv(
+    db: Session,
+    csv_path: str | Path,
+    import_date: str | None = None,
+    default_link_type_id: str | None = None,
+) -> DailyImportResult:
     target_date = resolve_import_date(csv_path, import_date)
     path = Path(csv_path)
+    if default_link_type_id and default_link_type_id not in valid_link_type_ids():
+        raise ValueError(f"invalid link_type: {default_link_type_id}")
     total_rows = 0
     new_products = 0
     new_entries = 0
     duplicate_count = 0
     errors: list[str] = []
+    type_stats: dict[str, int] = {}
+    category_stats: dict[str, dict[str, int]] = {}
 
     batch = AffiliateImportBatch(
         batch_name=path.name,
@@ -139,12 +147,15 @@ def import_daily_csv(db: Session, csv_path: str | Path, import_date: str | None 
             total_rows += 1
             try:
                 normalized = _normalized_row(row)
-                item = _row_to_product(normalized)
+                item = _row_to_product(normalized, filename=path.name, default_link_type_id=default_link_type_id)
                 if not item["product_name"] or not item["affiliate_url"]:
                     duplicate_count += 1
                     errors.append(f"Row {index}: missing product name or affiliate url")
                     continue
                 product, created = upsert_product(db, item)
+                type_stats[product.link_type_id] = type_stats.get(product.link_type_id, 0) + 1
+                category_stats.setdefault(product.link_type_id, {})
+                category_stats[product.link_type_id][product.category_id] = category_stats[product.link_type_id].get(product.category_id, 0) + 1
                 if created:
                     new_products += 1
                 existing_entry = db.scalar(
@@ -167,6 +178,8 @@ def import_daily_csv(db: Session, csv_path: str | Path, import_date: str | None 
     batch.imported_count = new_entries
     batch.duplicate_count = duplicate_count
     batch.error_count = len(errors)
+    batch.type_stats_json = json.dumps(type_stats, ensure_ascii=False)
+    batch.category_stats_json = json.dumps(category_stats, ensure_ascii=False)
     db.commit()
 
     cleanup_result = None
@@ -198,12 +211,15 @@ def add_daily_product(db: Session, text: str, import_date: str | None = None) ->
     affiliate_url = first if first.startswith("http") else second
     product_name = second if first.startswith("http") else first
     price = parts[2] if len(parts) >= 3 else ""
+    link_type_id = parts[3] if len(parts) >= 4 and parts[3] in valid_link_type_ids() else get_settings().daily_default_link_type
     item = {
         "product_name": product_name,
         "affiliate_url": affiliate_url,
         "product_url": "",
         "price": price,
         "shop_name": "",
+        "link_type_id": link_type_id,
+        "category_id": classify_product(product_name),
     }
     product, created = upsert_product(db, item)
     duplicate = 0
@@ -237,6 +253,15 @@ def upsert_product(db: Session, item: dict[str, str]) -> tuple[AffiliateProduct,
             if incoming and not current:
                 setattr(product, field, incoming)
                 changed = True
+        for field in ("link_type_id", "category_id", "subcategory_id"):
+            current = getattr(product, field) or ""
+            incoming = (item.get(field) or "").strip()
+            if incoming and (field == "link_type_id" and current == "shopee_commission" and incoming != current):
+                setattr(product, field, incoming)
+                changed = True
+            elif incoming and field in {"category_id", "subcategory_id"} and (not current or current == "other"):
+                setattr(product, field, incoming)
+                changed = True
         if changed:
             product.updated_at = datetime.now()
             db.flush()
@@ -248,7 +273,9 @@ def upsert_product(db: Session, item: dict[str, str]) -> tuple[AffiliateProduct,
         product_url=(item.get("product_url") or "").strip() or None,
         price=(item.get("price") or "").strip() or None,
         shop_name=(item.get("shop_name") or "").strip() or None,
-        category_id=classify_product(item["product_name"], item.get("shop_name") or ""),
+        link_type_id=(item.get("link_type_id") or get_settings().daily_default_link_type or "shopee_commission").strip(),
+        category_id=(item.get("category_id") or classify_product(item["product_name"], item.get("shop_name") or "")).strip(),
+        subcategory_id=(item.get("subcategory_id") or "").strip() or None,
         is_active=1,
     )
     db.add(product)
@@ -266,11 +293,14 @@ def recent_dates(db: Session, limit: int = 4) -> list[str]:
     return [str(row.import_date) for row in rows]
 
 
-def category_counts(db: Session, import_date: str) -> list[dict]:
+def category_counts(db: Session, import_date: str, link_type_id: str | None = None) -> list[dict]:
+    filters = [DailyLinkEntry.import_date == import_date, AffiliateProduct.is_active == 1]
+    if link_type_id:
+        filters.append(AffiliateProduct.link_type_id == link_type_id)
     rows = db.execute(
         select(AffiliateProduct.category_id, func.count(DailyLinkEntry.id))
         .join(AffiliateProduct, AffiliateProduct.id == DailyLinkEntry.product_id)
-        .where(DailyLinkEntry.import_date == import_date, AffiliateProduct.is_active == 1)
+        .where(*filters)
         .group_by(AffiliateProduct.category_id)
         .order_by(func.count(DailyLinkEntry.id).desc())
     ).all()
@@ -280,18 +310,27 @@ def category_counts(db: Session, import_date: str) -> list[dict]:
     ]
 
 
-def products_for_category(db: Session, import_date: str, category_id: str, limit: int | None = None) -> list[AffiliateProduct]:
+def products_for_category(
+    db: Session,
+    import_date: str,
+    category_id: str,
+    limit: int | None = None,
+    link_type_id: str | None = None,
+) -> list[AffiliateProduct]:
     settings = get_settings()
     max_items = limit or settings.daily_max_products_per_category
+    filters = [
+        DailyLinkEntry.import_date == import_date,
+        AffiliateProduct.category_id == category_id,
+        AffiliateProduct.is_active == 1,
+    ]
+    if link_type_id:
+        filters.append(AffiliateProduct.link_type_id == link_type_id)
     return list(
         db.scalars(
             select(AffiliateProduct)
             .join(DailyLinkEntry, DailyLinkEntry.product_id == AffiliateProduct.id)
-            .where(
-                DailyLinkEntry.import_date == import_date,
-                AffiliateProduct.category_id == category_id,
-                AffiliateProduct.is_active == 1,
-            )
+            .where(*filters)
             .order_by(AffiliateProduct.id.desc())
             .limit(max_items)
         )
@@ -306,7 +345,32 @@ def daily_stats(db: Session, import_date: str | None = None) -> dict:
         .join(AffiliateProduct, AffiliateProduct.id == DailyLinkEntry.product_id)
         .where(DailyLinkEntry.import_date == target_date, AffiliateProduct.is_active == 1)
     ) or 0
-    return {"import_date": target_date, "total_entries": int(total), "active_entries": int(active), "categories": category_counts(db, target_date)}
+    rows = db.execute(
+        select(AffiliateProduct.link_type_id, AffiliateProduct.category_id, func.count(DailyLinkEntry.id))
+        .join(AffiliateProduct, AffiliateProduct.id == DailyLinkEntry.product_id)
+        .where(DailyLinkEntry.import_date == target_date, AffiliateProduct.is_active == 1)
+        .group_by(AffiliateProduct.link_type_id, AffiliateProduct.category_id)
+        .order_by(AffiliateProduct.link_type_id, func.count(DailyLinkEntry.id).desc())
+    ).all()
+    types: dict[str, dict] = {}
+    for link_type_id, category_id, count in rows:
+        type_id = str(link_type_id or "shopee_commission")
+        types.setdefault(type_id, {"link_type_id": type_id, "link_type_name": link_type_name(type_id), "count": 0, "categories": []})
+        types[type_id]["count"] += int(count)
+        types[type_id]["categories"].append({"category_id": str(category_id), "label": category_label(str(category_id)), "count": int(count)})
+    unknown_categories = db.scalar(
+        select(func.count(DailyLinkEntry.id))
+        .join(AffiliateProduct, AffiliateProduct.id == DailyLinkEntry.product_id)
+        .where(DailyLinkEntry.import_date == target_date, AffiliateProduct.category_id == "other", AffiliateProduct.is_active == 1)
+    ) or 0
+    return {
+        "import_date": target_date,
+        "total_entries": int(total),
+        "active_entries": int(active),
+        "categories": category_counts(db, target_date),
+        "types": list(types.values()),
+        "unknown_categories": int(unknown_categories),
+    }
 
 
 def set_daily_product_active(db: Session, product_id: int, active: bool) -> bool:
@@ -319,8 +383,7 @@ def set_daily_product_active(db: Session, product_id: int, active: bool) -> bool
 
 
 def recategorize_product(db: Session, product_id: int, category_id: str) -> bool:
-    valid = {category["id"] for category in load_categories()}
-    if category_id not in valid:
+    if category_id not in valid_category_ids():
         return False
     product = db.get(AffiliateProduct, product_id)
     if not product:
@@ -330,7 +393,13 @@ def recategorize_product(db: Session, product_id: int, category_id: str) -> bool
     return True
 
 
-def build_category_message(import_date: str, category_id: str, products: list[AffiliateProduct]) -> list[str]:
+def build_category_message(import_date: str, category_id: str, products: list[AffiliateProduct], link_type_id: str | None = None) -> list[str]:
+    from app.services.telegram_daily_link_ui import build_product_messages
+
+    return build_product_messages(import_date, link_type_id or (products[0].link_type_id if products else "shopee_commission"), category_id, products)
+
+
+def _legacy_build_category_message(import_date: str, category_id: str, products: list[AffiliateProduct]) -> list[str]:
     settings = get_settings()
     per_message = max(1, min(10, settings.daily_links_per_message))
     chunks = [products[index : index + per_message] for index in range(0, len(products), per_message)]
@@ -353,13 +422,20 @@ def build_category_message(import_date: str, category_id: str, products: list[Af
     return messages
 
 
-def _row_to_product(row: dict[str, str]) -> dict[str, str]:
+def _row_to_product(row: dict[str, str], filename: str | None = None, default_link_type_id: str | None = None) -> dict[str, str]:
+    product_name = _first_value(row, "ten san pham", "ten uu dai", "product name", "name")
+    shop_name = _first_value(row, "ten cua hang", "shop name")
+    link_type = classify_affiliate_link_type(row, filename=filename, default_link_type_id=default_link_type_id)
+    category = classify_product_category(row, product_name=product_name, shop_name=shop_name)
     return {
-        "product_name": _first_value(row, "ten san pham", "product name", "name"),
-        "affiliate_url": _first_value(row, "link uu dai", "affiliate link", "affiliate url", "url"),
+        "product_name": product_name,
+        "affiliate_url": _first_value(row, "link uu dai", "affiliate link", "affiliate url", "link tiep thi", "tracking link", "url"),
         "product_url": _first_value(row, "link san pham", "product link", "product url"),
         "price": _first_value(row, "gia", "price"),
-        "shop_name": _first_value(row, "ten cua hang", "shop name"),
+        "shop_name": shop_name,
+        "link_type_id": link_type["link_type_id"],
+        "category_id": category["category_id"],
+        "subcategory_id": "",
     }
 
 
@@ -376,9 +452,6 @@ def _first_value(row: dict[str, str], *keys: str) -> str:
 
 
 def _normalize(value: str) -> str:
-    value = value.replace("đ", "d").replace("Đ", "D")
-    value = unicodedata.normalize("NFKD", value)
-    value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    value = value.lower()
-    value = re.sub(r"[^a-z0-9]+", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+    from app.services.affiliate_link_type_classifier import normalize_text
+
+    return normalize_text(value)

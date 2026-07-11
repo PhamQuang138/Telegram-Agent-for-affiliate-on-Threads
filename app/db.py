@@ -48,6 +48,7 @@ def init_db() -> None:
         _allow_duplicate_post_link_affiliate_urls()
     elif _normalized_database_url().startswith("postgresql"):
         _migrate_threads_posts_columns_postgres()
+        _migrate_daily_link_catalog_tables_postgres()
 
 
 def _migrate_threads_posts_columns() -> None:
@@ -405,8 +406,10 @@ def _migrate_daily_link_catalog_tables() -> None:
                 product_url TEXT,
                 price VARCHAR(64),
                 shop_name VARCHAR(255),
+                link_type_id VARCHAR(64) NOT NULL DEFAULT 'shopee_commission',
                 category_id VARCHAR(64) NOT NULL DEFAULT 'other',
                 subcategory VARCHAR(128),
+                subcategory_id VARCHAR(128),
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
@@ -414,7 +417,10 @@ def _migrate_daily_link_catalog_tables() -> None:
             """
         )
         connection.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_affiliate_products_affiliate_url ON affiliate_products (affiliate_url)")
+        _add_sqlite_column_if_missing(connection, "affiliate_products", "link_type_id", "VARCHAR(64) NOT NULL DEFAULT 'shopee_commission'")
+        _add_sqlite_column_if_missing(connection, "affiliate_products", "subcategory_id", "VARCHAR(128)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_affiliate_products_category_id ON affiliate_products (category_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_affiliate_products_link_type_id ON affiliate_products (link_type_id)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_affiliate_products_is_active ON affiliate_products (is_active)")
         connection.exec_driver_sql(
             """
@@ -427,10 +433,14 @@ def _migrate_daily_link_catalog_tables() -> None:
                 imported_count INTEGER NOT NULL DEFAULT 0,
                 duplicate_count INTEGER NOT NULL DEFAULT 0,
                 error_count INTEGER NOT NULL DEFAULT 0,
+                type_stats_json TEXT NOT NULL DEFAULT '{}',
+                category_stats_json TEXT NOT NULL DEFAULT '{}',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
             )
             """
         )
+        _add_sqlite_column_if_missing(connection, "affiliate_import_batches", "type_stats_json", "TEXT NOT NULL DEFAULT '{}'")
+        _add_sqlite_column_if_missing(connection, "affiliate_import_batches", "category_stats_json", "TEXT NOT NULL DEFAULT '{}'")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_affiliate_import_batches_import_date ON affiliate_import_batches (import_date)")
         connection.exec_driver_sql(
             """
@@ -449,6 +459,34 @@ def _migrate_daily_link_catalog_tables() -> None:
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_daily_link_entries_product_id ON daily_link_entries (product_id)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_daily_link_entries_import_date ON daily_link_entries (import_date)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_daily_link_entries_batch_id ON daily_link_entries (batch_id)")
+
+
+def _add_sqlite_column_if_missing(connection, table: str, column: str, column_type: str) -> None:
+    existing = {
+        row["name"]
+        for row in connection.exec_driver_sql(f"PRAGMA table_info('{table}')").mappings().all()
+    }
+    if column not in existing:
+        connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+
+def _migrate_daily_link_catalog_tables_postgres() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE affiliate_products ADD COLUMN IF NOT EXISTS link_type_id VARCHAR(64) NOT NULL DEFAULT 'shopee_commission'"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE affiliate_products ADD COLUMN IF NOT EXISTS subcategory_id VARCHAR(128)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_affiliate_products_link_type_id ON affiliate_products (link_type_id)"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE affiliate_import_batches ADD COLUMN IF NOT EXISTS type_stats_json TEXT NOT NULL DEFAULT '{}'"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE affiliate_import_batches ADD COLUMN IF NOT EXISTS category_stats_json TEXT NOT NULL DEFAULT '{}'"
+        )
 
 
 def _allow_duplicate_post_link_affiliate_urls() -> None:
