@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+affiliate_agent.db
+*.db
+node_modules
+__pycache__
+.pytest_cache
+.git
+note.txt

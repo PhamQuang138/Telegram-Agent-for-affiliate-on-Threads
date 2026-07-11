@@ -1,4 +1,5 @@
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from json import JSONDecodeError
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
@@ -76,7 +77,10 @@ async def telegram_webhook(
     if settings.telegram_webhook_secret:
         if x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
             raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
     await process_telegram_update(payload)
     return {"ok": True}
 
