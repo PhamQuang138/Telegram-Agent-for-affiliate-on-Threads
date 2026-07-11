@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -6,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base, AffiliateProduct, DailyLinkEntry, DemandOpportunity, ThreadsDemandAction, ThreadsDemandOpportunity, ThreadsPost, ThreadsPostLink, ThreadsPostMetric, ThreadsReply
+from app.models import AdminAffiliateLink
 from app.services.angle_library import select_angle
 import app.services.angle_library as angle_library
 from app.services.content_diversity import should_reduce_repetition
@@ -21,6 +23,14 @@ from app.services.daily_link_catalog import build_category_message, category_cou
 from app.services.daily_link_repository import get_categories_for_date_and_type, get_link_types_for_date, get_products_for_date_type_category
 from app.services.affiliate_link_type_classifier import classify_affiliate_link_type
 from app.services import daily_link_cleanup
+from app.services.admin_curated_links import (
+    cleanup_expired_admin_links,
+    close_batch as close_admin_link_batch,
+    get_links_for_delivery as get_admin_links_for_delivery,
+    ingest_admin_message,
+    parse_link_lines,
+    start_batch as start_admin_link_batch,
+)
 from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
 from app.services.telegram_cta_generator import generate_telegram_cta
 from app.services.reply_analysis import analyze_reply, calculate_purchase_intent_score
@@ -646,6 +656,71 @@ def test_daily_import_thousand_rows_does_not_call_ai(tmp_path, monkeypatch) -> N
         result = import_daily_csv(db, csv_path)
     assert result.new_entries == 1000
     assert calls["ai"] == 0
+
+
+def test_admin_curated_intake_requires_active_admin_batch(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr("app.services.admin_curated_links.get_settings", lambda: SimpleNamespace(
+        telegram_admin_user_ids="1",
+        telegram_community_group_id="-100",
+        link_intake_batch_timeout_minutes=30,
+        link_retention_days=4,
+        max_links_per_category=15,
+        private_link_request_cooldown_seconds=10,
+        private_link_max_requests_per_user_per_hour=10,
+        telegram_daily_link_disclosure="Cac link tren la link tiep thi lien ket.",
+    ))
+    with Session() as db:
+        ignored = ingest_admin_message(db, 1, -100, "Quat mini | https://s.shopee.vn/a")
+        batch = start_admin_link_batch(db, 1, -100, "exclusive_offer", "home")
+        saved = ingest_admin_message(db, 1, -100, "Quat mini | https://s.shopee.vn/a\nhttps://s.shopee.vn/b")
+        duplicate = ingest_admin_message(db, 1, -100, "Trung | https://s.shopee.vn/a")
+        close_admin_link_batch(db, 1, -100)
+        links = get_admin_links_for_delivery(db, "exclusive_offer", "home")
+    assert ignored.added == 0
+    assert batch.link_type_id == "exclusive_offer"
+    assert saved.added == 2
+    assert duplicate.duplicates == 1
+    assert [link.affiliate_url for link in links] == ["https://s.shopee.vn/b", "https://s.shopee.vn/a"]
+
+
+def test_admin_curated_parse_lines_does_not_fetch_or_infer() -> None:
+    rows = parse_link_lines("Quạt mini | https://s.shopee.vn/a?x=1\nhttps://s.shopee.vn/b\nkhong co link")
+    assert rows[0]["display_name"] == "Quạt mini"
+    assert rows[0]["affiliate_url"] == "https://s.shopee.vn/a?x=1"
+    assert rows[1]["display_name"] == "Link ưu đãi 2"
+    assert rows[2] is None
+
+
+def test_admin_curated_delivery_max_15_and_cleanup(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr("app.services.admin_curated_links.get_settings", lambda: SimpleNamespace(
+        telegram_admin_user_ids="1",
+        telegram_community_group_id="-100",
+        link_intake_batch_timeout_minutes=30,
+        link_retention_days=4,
+        max_links_per_category=15,
+        private_link_request_cooldown_seconds=10,
+        private_link_max_requests_per_user_per_hour=10,
+        telegram_daily_link_disclosure="Cac link tren la link tiep thi lien ket.",
+    ))
+    with Session() as db:
+        start_admin_link_batch(db, 1, -100, "xtra_commission", "electronics")
+        text = "\n".join(f"Mon {index} | https://s.shopee.vn/{index}" for index in range(20))
+        ingest_admin_message(db, 1, -100, text)
+        links = get_admin_links_for_delivery(db, "xtra_commission", "electronics")
+        old = links[-1]
+        old.created_at = datetime(2026, 7, 1)
+        db.commit()
+        cleanup = cleanup_expired_admin_links(db)
+        active_after_cleanup = db.query(AdminAffiliateLink).filter(AdminAffiliateLink.is_active == 1).count()
+    assert len(links) == 15
+    assert cleanup["links_deactivated"] == 1
+    assert active_after_cleanup == 19
 
 
 def test_telegram_cta_contains_group_url_and_avoids_recent() -> None:

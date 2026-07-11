@@ -7,11 +7,9 @@ Current product scope:
 ```text
 Threads engagement post
 -> Telegram group CTA reply
--> Telegram daily link catalog
--> choose date
--> choose campaign type
--> choose category
--> receive Shopee affiliate links
+-> admin-curated Telegram link catalog
+-> member chooses campaign type/category
+-> bot sends links privately
 ```
 
 Older demand scanner, purchase opportunity, learning, trend, and cross-platform features are frozen by default. See `docs/FROZEN_FEATURES.md`.
@@ -35,17 +33,17 @@ python -m app.main
 - [Shopee Draft Generation](#shopee-draft-generation)
 - [Engagement Posts](#engagement-posts)
 - [AI Provider Rotation](#ai-provider-rotation)
-- [Import Shopee CSV](#import-shopee-csv)
+- [Legacy Shopee CSV](#legacy-shopee-csv)
 - [Threads Posting](#threads-posting)
 - [Repository Hygiene](#repository-hygiene)
 
 ## Features
 
-- Maintain a Telegram daily link catalog with date, campaign type, and category menus.
-- Import and de-duplicate Shopee affiliate CSV files by day.
-- Classify daily affiliate links into campaign type and product category without AI calls.
-- Keep only the latest 4 daily catalog dates by default.
-- Send category link lists into a configured Telegram group.
+- Maintain an admin-curated Telegram affiliate link catalog.
+- Store only links sent directly by configured admins in the configured Telegram group.
+- Organize links by campaign type and product category without AI calls.
+- Send requested category links privately to each member, up to 15 links per request.
+- Keep admin-entered links active for 4 days by default.
 - Generate and publish Threads engagement posts.
 - Reply to Threads engagement posts with a Telegram group CTA.
 - Track clicks through `GET /go/{slug}` and store analytics in SQLite.
@@ -102,10 +100,18 @@ POST_TRACKING_LINK_AS_REPLY=true
 COMMENT_LINK_TARGET=affiliate
 
 ENABLE_DAILY_LINK_CATALOG=true
+ENABLE_ADMIN_LINK_INTAKE=true
+ENABLE_PRIVATE_LINK_DELIVERY=true
+ENABLE_DAILY_LINK_CLEANUP=true
+ENABLE_CSV_DAILY_IMPORT=false
+ENABLE_AUTOMATIC_CATEGORY_IMPORT=false
+ENABLE_SHOPEE_FETCH=false
 ENABLE_THREADS_ENGAGEMENT_POSTS=true
 ENABLE_TELEGRAM_GROUP=true
 ENABLE_DAILY_LINK_AUTO_CLEANUP=true
 TELEGRAM_COMMUNITY_GROUP_ID=
+TELEGRAM_ADMIN_USER_IDS=
+TELEGRAM_BOT_USERNAME=
 TELEGRAM_GROUP_INVITE_URL=
 TELEGRAM_GROUP_DISPLAY_NAME=Nhom link uu dai
 TELEGRAM_DAILY_LINK_DISCLOSURE=Cac link tren la link tiep thi lien ket.
@@ -120,6 +126,12 @@ DAILY_GROUP_SEND_COOLDOWN_SECONDS=30
 DAILY_LINK_RETENTION_DAYS=4
 DAILY_LINK_TIMEZONE=Asia/Bangkok
 DAILY_LINK_DELETE_ORPHAN_PRODUCTS=true
+MAX_LINKS_PER_CATEGORY=15
+LINK_RETENTION_DAYS=4
+LINK_INTAKE_BATCH_TIMEOUT_MINUTES=30
+SEND_GUIDE_AFTER_BATCH=true
+PRIVATE_LINK_REQUEST_COOLDOWN_SECONDS=10
+PRIVATE_LINK_MAX_REQUESTS_PER_USER_PER_HOUR=10
 THREADS_INCLUDE_TELEGRAM_CTA=true
 THREADS_TELEGRAM_CTA_MODE=reply
 THREADS_TELEGRAM_GROUP_URL=
@@ -208,6 +220,8 @@ TELEGRAM_WEBHOOK_SECRET=<random-secret>
 CRON_SECRET=<random-secret>
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE
 TELEGRAM_BOT_TOKEN=
+TELEGRAM_ADMIN_USER_IDS=
+TELEGRAM_BOT_USERNAME=Mr_BusinessPODBot
 THREADS_ACCOUNTS=acc1,acc2
 THREADS_ACC1_USER_ID=
 THREADS_ACC1_ACCESS_TOKEN=
@@ -260,25 +274,18 @@ GET /api/cron/cleanup-daily-links
 /features
 
 /links
-/deal
-/linkngay
-/linkdates
-/dealhomnay
+/docquyen
 
-/importdaily <csv_path> [date] [link_type]
-/adddailylink <url> | <name> | <price> | <link_type>
-/adddailytext
-/linktypes
-/dailystats [date]
-/recategorize <link_id> <category_id>
-/retype <link_id> <link_type_id>
-/viewproduct <link_id>
-/deactivatedaily <link_id>
-/activatedaily <link_id>
-/senddaily <date> <link_type_id> <category_id> [group|channel]
-/sendtoday
-/cleanuppreview
-/cleanupdaily
+/linkbatch
+/endlinkbatch
+/cancellinkbatch
+/currentlinkbatch
+/linkstats
+/cleanlinks
+/cleanlinkspreview
+/viewlink <link_id>
+/deactivatelink <link_id>
+/activatelink <link_id>
 
 /queue
 /view <post_id>
@@ -295,7 +302,7 @@ Frozen commands return a short frozen-feature message instead of running the old
 
 ## Daily Link Catalog
 
-Daily Link Catalog is deterministic and rule-based. It does not call OpenRouter, Gemini, OpenAI, or any AI provider during CSV import, link type classification, category classification, menu rendering, stats, cleanup, or Telegram group sending. AI is only used by Threads content workflows.
+Daily Link Catalog is now admin-curated. The bot does not fetch URLs, scrape pages, call Shopee, call Threads, crawl websites, or use AI in this workflow. It only stores links that a configured admin sends directly inside `TELEGRAM_COMMUNITY_GROUP_ID` while an admin batch is active.
 
 The catalog has two levels:
 
@@ -312,75 +319,55 @@ product_commission  Hoa hong San pham
 exclusive_offer     Uu dai doc quyen
 ```
 
-Show type IDs:
+Admin workflow:
 
 ```text
-/linktypes
+/linkbatch
+choose campaign type
+choose category
+send one or more lines:
+Quạt mini để bàn | https://s.shopee.vn/...
+https://s.shopee.vn/...
+/endlinkbatch
 ```
 
-Import links for today:
+After `/endlinkbatch`, the bot posts a guide message to the group when the batch contains at least one link.
+
+Member workflow:
 
 ```text
-/importdaily shopee.csv
-```
-
-Import links for a specific date:
-
-```text
-/importdaily shopee.csv 2026-07-11
-```
-
-Import with a default campaign type:
-
-```text
-/importdaily shopee.csv today xtra_commission
-```
-
-Row-level campaign type columns still win over the default. Supported columns include `Loai hoa hong`, `Loai chien dich`, `Nhom chien dich`, `Ten chien dich`, `Campaign Type`, `Commission Type`, `Loai uu dai`, `Nguon link`, and `Danh muc link`.
-
-Add one link manually:
-
-```text
-/adddailylink https://s.shopee.vn/xxx | Quat mini de ban | 79000 | xtra_commission
-```
-
-Show the public menu:
-
-```text
+/docquyen
 /links
-/linkdates
-/dealhomnay
 ```
 
-The bot shows up to 4 recent dates, then campaign type buttons, then category buttons with counts. When a category is selected, the bot sends a small paginated batch to `TELEGRAM_COMMUNITY_GROUP_ID`.
+The bot shows category/type menus in the group, then sends up to `MAX_LINKS_PER_CATEGORY` links privately to the member who clicked. If the member has not started the bot, the group message shows a deep-link button so they can open the bot and receive the pending request.
 
-Manual fixes:
+Admin commands:
 
 ```text
-/retype <product_id> <link_type_id>
-/recategorize <product_id> <category_id>
-/viewproduct <product_id>
+/currentlinkbatch
+/cancellinkbatch
+/linkstats
+/cleanlinks
+/cleanlinkspreview
+/viewlink <link_id>
+/deactivatelink <link_id>
+/activatelink <link_id>
 ```
 
-Admin send requires both type and category:
+Cleanup runs on startup, cron, and `/cleanlinks`.
 
 ```text
-/senddaily 2026-07-11 xtra_commission home group
+/cleanlinkspreview
+/cleanlinks
 ```
 
-Cleanup runs on startup and after daily imports/adds when `ENABLE_DAILY_LINK_AUTO_CLEANUP=true`.
+Admin-curated catalog tables:
 
 ```text
-/cleanuppreview
-/cleanupdaily
-```
-
-Daily catalog tables:
-
-```text
-affiliate_products
-daily_link_entries
-affiliate_import_batches
+admin_link_batches
+admin_affiliate_links
+private_link_requests
 ```
 
 ## Frozen Features
@@ -800,72 +787,19 @@ Model rotation behavior:
 - Gemini high-demand `503` errors are treated as temporary and the bot tries another provider/model.
 - Low-quality or malformed model output can trigger a short cooldown for that model.
 
-## Import Shopee CSV
+## Legacy Shopee CSV
 
-Import a Shopee Affiliate CSV from the command line:
+CSV import code remains in the repository for legacy Threads draft workflows, but it is not registered in the Telegram bot when running the admin-curated link model.
 
-```bash
-python scripts/import_shopee_csv.py "C:\Users\duyqu\Downloads\shopee.csv"
-```
-
-Limit the number of generated drafts:
-
-```bash
-python scripts/import_shopee_csv.py "C:\Users\duyqu\Downloads\shopee.csv" --limit 5
-```
-
-Change group size:
-
-```bash
-python scripts/import_shopee_csv.py "C:\Users\duyqu\Downloads\shopee.csv" --group-size 3
-python scripts/import_shopee_csv.py "C:\Users\duyqu\Downloads\shopee.csv" --group-size 6
-```
-
-Scan a new CSV from Telegram before importing:
-
-```text
-/updatelink file.csv
-/updatelink file.csv 6
-/confirmupdate
-```
-
-Cancel a pending CSV scan:
-
-```text
-/cancelupdate
-```
-
-`/updatelink` only scans and previews new links. Posts are created only after `/confirmupdate`. Links already in the database are skipped.
-
-CSV columns supported:
-
-```text
-Tên sản phẩm
-Link ưu đãi
-```
-
-For richer product CSV files, the importer also uses:
-
-```text
-Tên sản phẩm
-Link sản phẩm
-Giá
-Tên cửa hàng
-Link ưu đãi
-```
-
-Campaign-style CSV files can use `Tên ưu đãi`.
-
-## Startup CSV Import
-
-To scan a CSV automatically whenever the bot starts:
+Keep these disabled for the current production workflow:
 
 ```env
-STARTUP_IMPORT_CSV_PATH=shopee.csv
-STARTUP_GENERATE_LIMIT=2
+ENABLE_CSV_DAILY_IMPORT=false
+ENABLE_AUTOMATIC_CATEGORY_IMPORT=false
+ENABLE_SHOPEE_FETCH=false
 ```
 
-On startup, the bot scans the CSV, skips duplicate affiliate links, and generates up to `STARTUP_GENERATE_LIMIT` posts.
+Admin-curated Telegram links must come from `/linkbatch` and admin messages in the configured group, not CSV files.
 
 ## Draft Refreshing
 

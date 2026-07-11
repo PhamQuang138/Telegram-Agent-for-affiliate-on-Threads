@@ -158,6 +158,54 @@ class AffiliateImportBatch(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AdminLinkBatch(Base):
+    __tablename__ = "admin_link_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    group_chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    link_type_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    link_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    guide_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class AdminAffiliateLink(Base):
+    __tablename__ = "admin_affiliate_links"
+    __table_args__ = (UniqueConstraint("batch_id", "affiliate_url", name="uq_admin_link_batch_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_link_batches.id"), nullable=False, index=True)
+    admin_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    group_chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    link_type_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    affiliate_url: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class PrivateLinkRequest(Base):
+    __tablename__ = "private_link_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    group_chat_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    link_type_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ThreadsPostMetric(Base):
     __tablename__ = "threads_post_metrics"
     __table_args__ = (UniqueConstraint("account_name", "threads_media_id", name="uq_threads_metric_account_media"),)

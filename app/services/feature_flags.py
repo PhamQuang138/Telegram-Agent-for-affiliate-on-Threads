@@ -4,6 +4,13 @@ from app.config import get_settings
 
 DEFAULT_FLAGS: dict[str, bool] = {
     "daily_link_catalog": True,
+    "admin_link_intake": True,
+    "private_link_delivery": True,
+    "daily_link_cleanup": True,
+    "csv_daily_import": False,
+    "automatic_category_import": False,
+    "shopee_fetch": False,
+    "trend_engine": False,
     "threads_engagement_posts": True,
     "telegram_group": True,
     "telegram_channel": False,

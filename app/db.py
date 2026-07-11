@@ -45,10 +45,12 @@ def init_db() -> None:
         _migrate_threads_demand_tables()
         _migrate_demand_opportunity_tables()
         _migrate_daily_link_catalog_tables()
+        _migrate_admin_curated_link_tables()
         _allow_duplicate_post_link_affiliate_urls()
     elif _normalized_database_url().startswith("postgresql"):
         _migrate_threads_posts_columns_postgres()
         _migrate_daily_link_catalog_tables_postgres()
+        _migrate_admin_curated_link_tables_postgres()
 
 
 def _migrate_threads_posts_columns() -> None:
@@ -487,6 +489,138 @@ def _migrate_daily_link_catalog_tables_postgres() -> None:
         connection.exec_driver_sql(
             "ALTER TABLE affiliate_import_batches ADD COLUMN IF NOT EXISTS category_stats_json TEXT NOT NULL DEFAULT '{}'"
         )
+
+
+def _migrate_admin_curated_link_tables() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS admin_link_batches (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                admin_user_id INTEGER NOT NULL,
+                group_chat_id VARCHAR(64) NOT NULL,
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'active',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                closed_at DATETIME,
+                link_count INTEGER NOT NULL DEFAULT 0,
+                guide_message_id VARCHAR(255)
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_link_batches_admin_user_id ON admin_link_batches (admin_user_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_link_batches_group_chat_id ON admin_link_batches (group_chat_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_link_batches_status ON admin_link_batches (status)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_link_batches_created_at ON admin_link_batches (created_at)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS admin_affiliate_links (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                batch_id INTEGER NOT NULL,
+                admin_user_id INTEGER NOT NULL,
+                group_chat_id VARCHAR(64) NOT NULL,
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                affiliate_url TEXT NOT NULL,
+                content_hash VARCHAR(64) NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                expires_at DATETIME NOT NULL,
+                CONSTRAINT uq_admin_link_batch_url UNIQUE (batch_id, affiliate_url),
+                FOREIGN KEY(batch_id) REFERENCES admin_link_batches (id)
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_batch_id ON admin_affiliate_links (batch_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_link_type_id ON admin_affiliate_links (link_type_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_category_id ON admin_affiliate_links (category_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_is_active ON admin_affiliate_links (is_active)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_created_at ON admin_affiliate_links (created_at)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_expires_at ON admin_affiliate_links (expires_at)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS private_link_requests (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                request_token VARCHAR(64) NOT NULL UNIQUE,
+                telegram_user_id INTEGER NOT NULL,
+                group_chat_id VARCHAR(64) NOT NULL DEFAULT '',
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                expires_at DATETIME NOT NULL,
+                completed_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_private_link_requests_request_token ON private_link_requests (request_token)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_requests_telegram_user_id ON private_link_requests (telegram_user_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_requests_status ON private_link_requests (status)")
+
+
+def _migrate_admin_curated_link_tables_postgres() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS admin_link_batches (
+                id SERIAL PRIMARY KEY,
+                admin_user_id INTEGER NOT NULL,
+                group_chat_id VARCHAR(64) NOT NULL,
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'active',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                closed_at TIMESTAMP WITH TIME ZONE,
+                link_count INTEGER NOT NULL DEFAULT 0,
+                guide_message_id VARCHAR(255)
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_link_batches_admin_user_id ON admin_link_batches (admin_user_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_link_batches_group_chat_id ON admin_link_batches (group_chat_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_link_batches_status ON admin_link_batches (status)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS admin_affiliate_links (
+                id SERIAL PRIMARY KEY,
+                batch_id INTEGER NOT NULL REFERENCES admin_link_batches(id),
+                admin_user_id INTEGER NOT NULL,
+                group_chat_id VARCHAR(64) NOT NULL,
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                affiliate_url TEXT NOT NULL,
+                content_hash VARCHAR(64) NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                CONSTRAINT uq_admin_link_batch_url UNIQUE (batch_id, affiliate_url)
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_batch_id ON admin_affiliate_links (batch_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_link_type_id ON admin_affiliate_links (link_type_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_category_id ON admin_affiliate_links (category_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_is_active ON admin_affiliate_links (is_active)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS private_link_requests (
+                id SERIAL PRIMARY KEY,
+                request_token VARCHAR(64) NOT NULL UNIQUE,
+                telegram_user_id INTEGER NOT NULL,
+                group_chat_id VARCHAR(64) NOT NULL DEFAULT '',
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                completed_at TIMESTAMP WITH TIME ZONE
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_private_link_requests_request_token ON private_link_requests (request_token)")
 
 
 def _allow_duplicate_post_link_affiliate_urls() -> None:

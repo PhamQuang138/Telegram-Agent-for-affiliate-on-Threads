@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import AppSetting
 from app.services.daily_link_cleanup import cleanup_expired_daily_links
+from app.services.admin_curated_links import cleanup_expired_admin_links
 from app.services.threads_repository import get_post_by_slug, get_post_link_by_slug, log_click
 from app.telegram_bot import build_application
 
@@ -124,7 +125,16 @@ def cleanup_daily_links_cron(
     provided = x_cron_secret or bearer or secret or ""
     if settings.cron_secret and provided != settings.cron_secret:
         raise HTTPException(status_code=401, detail="Invalid cron secret")
-    return cleanup_expired_daily_links(settings.daily_link_retention_days)
+    legacy = cleanup_expired_daily_links(settings.daily_link_retention_days)
+    try:
+        with SessionLocal() as db:
+            admin = cleanup_expired_admin_links(db)
+    except Exception:
+        logger.exception("Admin curated cleanup failed")
+        admin = {"links_deactivated": 0, "requests_expired": 0, "error": "cleanup_failed"}
+    if isinstance(legacy, dict):
+        return {**legacy, "admin_curated": admin}
+    return {"legacy_daily": legacy, "admin_curated": admin}
 
 
 @app.get("/go/{slug}")

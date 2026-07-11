@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Forbidden
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agents.threads_shopee_agent import (
@@ -21,7 +22,7 @@ from agents.threads_shopee_agent import (
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import AppSetting, DemandOpportunity, ThreadsPost, ThreadsPostMetric, ThreadsReply
-from app.models import AffiliateProduct, DailyLinkEntry
+from app.models import AdminAffiliateLink, AffiliateProduct, DailyLinkEntry
 from app.schemas import ThreadsDraftRequest
 from app.services.shopee_csv_importer import import_shopee_csv, scan_shopee_csv
 from app.services.content_engine import generate_content_ideas
@@ -100,7 +101,7 @@ from app.services.affiliate_link_type_classifier import (
     load_link_types,
     valid_link_type_ids,
 )
-from app.services.product_category_classifier import category_label, valid_category_ids
+from app.services.product_category_classifier import category_label, load_categories, valid_category_ids
 from app.services.telegram_daily_link_ui import (
     build_product_messages,
     category_keyboard,
@@ -113,6 +114,24 @@ from app.services.telegram_daily_link_ui import (
     parse_type_callback,
 )
 from app.services.telegram_cta_generator import generate_telegram_cta
+from app.services.admin_curated_links import (
+    active_batch_for_admin as admin_active_batch_for_admin,
+    build_private_link_messages,
+    categories_for_type as admin_categories_for_type,
+    cleanup_expired_admin_links,
+    close_batch as admin_close_batch,
+    complete_private_request,
+    create_private_request,
+    get_links_for_delivery,
+    get_pending_request,
+    ingest_admin_message,
+    is_admin as is_link_admin,
+    is_configured_group,
+    link_stats as admin_link_stats,
+    set_batch_guide_message,
+    start_batch as admin_start_batch,
+    user_request_allowed,
+)
 from app.services.manual_demand_intake import create_manual_demand, import_demands_csv
 from app.services.demand_opportunity_service import (
     approve_batch as approve_buy_batch_service,
@@ -130,6 +149,9 @@ from app.services.threads_demand_scanner import (
     build_scan_keywords,
     scan_threads_demand,
 )
+
+LINK_TYPE_CODES = {"sh": "shopee_commission", "xt": "xtra_commission", "pc": "product_commission", "ex": "exclusive_offer"}
+LINK_TYPE_ID_TO_CODE = {value: key for key, value in LINK_TYPE_CODES.items()}
 
 PENDING_UPDATES: dict[int, tuple[str, int]] = {}
 PENDING_ENGAGEMENT_POSTS: dict[int, dict[str, str]] = {}
@@ -2349,6 +2371,69 @@ def _telegram_group_target() -> int | str | None:
     return raw or None
 
 
+def _link_type_code(link_type_id: str) -> str:
+    return LINK_TYPE_ID_TO_CODE.get(link_type_id, link_type_id[:2])
+
+
+def _link_type_from_code(code: str) -> str | None:
+    return LINK_TYPE_CODES.get(code)
+
+
+def _admin_required(update: Update) -> bool:
+    user = update.effective_user
+    return is_link_admin(user.id if user else None)
+
+
+def _group_required(update: Update) -> bool:
+    chat = update.effective_chat
+    return is_configured_group(chat.id if chat else None)
+
+
+def _admin_group_required(update: Update) -> bool:
+    return _admin_required(update) and _group_required(update)
+
+
+def _link_type_buttons(prefix: str, user_id: int | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    for item in load_link_types():
+        code = _link_type_code(item["id"])
+        callback = f"{prefix}:{code}" if user_id is None else f"{prefix}:{user_id}:{code}"
+        rows.append([InlineKeyboardButton(item["name"], callback_data=callback)])
+    return InlineKeyboardMarkup(rows)
+
+
+def _category_buttons(prefix: str, link_type_id: str, categories: list[dict], user_id: int | None = None) -> InlineKeyboardMarkup:
+    code = _link_type_code(link_type_id)
+    rows = []
+    for item in categories:
+        callback = f"{prefix}:{code}:{item['category_id']}" if user_id is None else f"{prefix}:{user_id}:{code}:{item['category_id']}"
+        rows.append([InlineKeyboardButton(f"{item['label']} ({item['count']})", callback_data=callback)])
+    return InlineKeyboardMarkup(rows)
+
+
+def _guide_text() -> str:
+    return (
+        "Link ưu đãi mới đã được cập nhật.\n\n"
+        "Cách nhận link riêng:\n"
+        "- /docquyen - xem các link ưu đãi độc quyền\n"
+        "- /links - chọn loại link và danh mục bạn muốn\n\n"
+        "Bot sẽ gửi danh sách riêng qua tin nhắn cá nhân, tối đa 15 link cho mỗi danh mục.\n"
+        "Lần đầu sử dụng, hãy mở bot và bấm Start để bot có thể gửi tin nhắn cho bạn."
+    )
+
+
+def _guide_keyboard() -> InlineKeyboardMarkup:
+    bot_username = get_settings().telegram_bot_username.strip().lstrip("@")
+    open_url = f"https://t.me/{bot_username}" if bot_username else "https://t.me/"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Nhận link độc quyền", callback_data="ac:docq")],
+            [InlineKeyboardButton("Chọn danh mục", callback_data="ac:links")],
+            [InlineKeyboardButton("Mở bot", url=open_url)],
+        ]
+    )
+
+
 def _parse_importdaily_args(text: str) -> tuple[str, str | None, str | None]:
     raw = text.partition(" ")[2].strip()
     if not raw:
@@ -2405,22 +2490,31 @@ def _looks_like_local_path(path: str) -> bool:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.args and context.args[0].startswith("links_") and update.effective_user:
+        token = context.args[0].removeprefix("links_")
+        with _db() as db:
+            request = get_pending_request(db, token, update.effective_user.id)
+            if not request:
+                await update.message.reply_text("Yeu cau link da het han hoac khong hop le. Hay quay lai group va bam lai /links.")
+                return
+            links = get_links_for_delivery(db, request.link_type_id, request.category_id)
+            for text in build_private_link_messages(request.link_type_id, request.category_id, links):
+                await context.bot.send_message(chat_id=update.effective_user.id, text=text, disable_web_page_preview=True)
+            complete_private_request(db, request)
+        return
     await update.message.reply_text(
         """POD Bot - Telegram link catalog + Threads engagement
 
 Kho link:
 /links
-/linkdates
-/dealhomnay
+/docquyen
 
-Admin import:
-/importdaily <csv_path> [date] [link_type]
-/adddailylink <url> | <name> | <price> | <link_type>
-/adddailytext
-/linktypes
-/dailystats [date]
-/cleanuppreview
-/cleanupdaily
+Admin link intake:
+/linkbatch
+/endlinkbatch
+/cancellinkbatch
+/currentlinkbatch
+/linkstats
 
 Threads:
 /engagepost <topic>
@@ -2447,6 +2541,329 @@ async def frozen_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     await update.message.reply_text(f"chat_id: {chat.id if chat else 'unknown'}")
+
+
+async def linkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_group_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        return
+    with _db() as db:
+        cleanup_expired_admin_links(db)
+    await update.message.reply_text(
+        "Chon loai link cho dot nhap:",
+        reply_markup=_link_type_buttons("ac:bt"),
+    )
+
+
+async def choose_batch_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    if not is_link_admin(query.from_user.id if query.from_user else None):
+        await query.message.reply_text("Ban khong co quyen tao batch.")
+        return
+    code = (query.data or "").rsplit(":", 1)[-1]
+    link_type_id = _link_type_from_code(code)
+    if not link_type_id:
+        await query.message.reply_text("Loai link khong hop le.")
+        return
+    categories = [{"category_id": item["id"], "label": item.get("label", item["id"]), "count": 0} for item in load_categories()]
+    await query.edit_message_text(
+        f"Chon danh muc cho {link_type_name(link_type_id)}:",
+        reply_markup=_category_buttons("ac:bc", link_type_id, categories),
+    )
+
+
+async def choose_batch_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    if not is_link_admin(query.from_user.id if query.from_user else None):
+        await query.message.reply_text("Ban khong co quyen tao batch.")
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) != 4:
+        return
+    link_type_id = _link_type_from_code(parts[2])
+    category_id = parts[3]
+    if not link_type_id or category_id not in valid_category_ids():
+        await query.message.reply_text("Loai link hoac danh muc khong hop le.")
+        return
+    with _db() as db:
+        batch = admin_start_batch(db, query.from_user.id, query.message.chat_id, link_type_id, category_id)
+    await query.edit_message_text(
+        "Da bat dau dot nhap:\n"
+        f"Loai: {link_type_name(batch.link_type_id)}\n"
+        f"Danh muc: {category_label(batch.category_id)}\n\n"
+        "Admin hay gui link, moi dong mot link hoac:\n"
+        "Ten san pham | https://..."
+    )
+
+
+async def ingest_admin_link_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not message or not user or not chat:
+        return
+    if not is_configured_group(chat.id) or not is_link_admin(user.id):
+        return
+    text = message.text or ""
+    if not text or text.startswith("/"):
+        return
+    with _db() as db:
+        result = ingest_admin_message(db, user.id, chat.id, text)
+    if not result.batch or result.added <= 0:
+        return
+    await message.reply_text(
+        f"Da them {result.added} link vao:\n"
+        f"{link_type_name(result.batch.link_type_id)} -> {category_label(result.batch.category_id)}"
+        + (f"\nTrung trong batch: {result.duplicates}" if result.duplicates else "")
+    )
+
+
+async def endlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_group_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        return
+    with _db() as db:
+        batch = admin_close_batch(db, update.effective_user.id, update.effective_chat.id, "completed")
+        cleanup_expired_admin_links(db)
+    if not batch:
+        await update.message.reply_text("Khong co batch active.")
+        return
+    await update.message.reply_text(f"Da ket thuc batch #{batch.id}. Link da luu: {batch.link_count}")
+    if batch.link_count and get_settings().send_guide_after_batch:
+        sent = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_guide_text(),
+            reply_markup=_guide_keyboard(),
+            disable_web_page_preview=True,
+        )
+        with _db() as db:
+            set_batch_guide_message(db, batch.id, sent.message_id)
+
+
+async def cancellinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_group_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        return
+    with _db() as db:
+        batch = admin_close_batch(db, update.effective_user.id, update.effective_chat.id, "cancelled")
+    await update.message.reply_text("Da huy batch." if batch else "Khong co batch active.")
+
+
+async def currentlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_group_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        return
+    with _db() as db:
+        batch = admin_active_batch_for_admin(db, update.effective_user.id, update.effective_chat.id)
+    if not batch:
+        await update.message.reply_text("Khong co batch active.")
+        return
+    await update.message.reply_text(
+        f"Batch #{batch.id}\nLoai: {link_type_name(batch.link_type_id)}\nDanh muc: {category_label(batch.category_id)}\nLink: {batch.link_count}"
+    )
+
+
+async def docquyen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _show_request_categories(update, "exclusive_offer")
+
+
+async def admin_links_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    await update.message.reply_text(
+        "Ban muon xem loai link nao?",
+        reply_markup=_link_type_buttons("ac:rt", user.id if user else None),
+    )
+
+
+async def request_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    if len(parts) != 4:
+        return
+    requester_id = int(parts[2])
+    if not query.from_user or query.from_user.id != requester_id:
+        await query.message.reply_text("Menu nay khong phai cua ban.")
+        return
+    link_type_id = _link_type_from_code(parts[3])
+    if not link_type_id:
+        await query.message.reply_text("Loai link khong hop le.")
+        return
+    await _show_request_categories(update, link_type_id, edit=True)
+
+
+async def _show_request_categories(update: Update, link_type_id: str, edit: bool = False) -> None:
+    user = update.effective_user
+    if not user:
+        return
+    with _db() as db:
+        cats = admin_categories_for_type(db, link_type_id)
+    if not cats:
+        target = update.callback_query.message if update.callback_query else update.message
+        await target.reply_text("Hien chua co link active cho muc nay.")
+        return
+    text = f"Chon danh muc {link_type_name(link_type_id)}:"
+    markup = _category_buttons("ac:rc", link_type_id, cats, user.id)
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=markup)
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(text, reply_markup=markup)
+    else:
+        await update.message.reply_text(text, reply_markup=markup)
+
+
+async def guide_links_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    if query.data == "ac:docq":
+        await _show_request_categories(update, "exclusive_offer")
+    else:
+        await query.message.reply_text(
+            "Ban muon xem loai link nao?",
+            reply_markup=_link_type_buttons("ac:rt", query.from_user.id if query.from_user else None),
+        )
+
+
+async def request_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    if len(parts) != 5:
+        return
+    requester_id = int(parts[2])
+    if not query.from_user or query.from_user.id != requester_id:
+        await query.message.reply_text("Menu nay khong phai cua ban.")
+        return
+    link_type_id = _link_type_from_code(parts[3])
+    category_id = parts[4]
+    if not link_type_id or category_id not in valid_category_ids():
+        await query.message.reply_text("Loai link hoac danh muc khong hop le.")
+        return
+    await _deliver_private_links(update, context, query.from_user.id, query.message.chat_id, link_type_id, category_id)
+
+
+async def _deliver_private_links(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, group_chat_id: int | str, link_type_id: str, category_id: str) -> None:
+    query = update.callback_query
+    with _db() as db:
+        allowed, reason = user_request_allowed(db, user_id)
+        if not allowed:
+            await query.message.reply_text("Ban dang yeu cau qua nhanh, vui long thu lai sau.")
+            return
+        links = get_links_for_delivery(db, link_type_id, category_id)
+    if not links:
+        await query.message.reply_text("Danh muc nay hien chua co link active.")
+        return
+    with _db() as db:
+        request = create_private_request(db, user_id, group_chat_id, link_type_id, category_id)
+    try:
+        for text in build_private_link_messages(link_type_id, category_id, links):
+            await context.bot.send_message(chat_id=user_id, text=text, disable_web_page_preview=True)
+        with _db() as db:
+            stored = db.get(type(request), request.id)
+            if stored:
+                complete_private_request(db, stored)
+        await query.message.reply_text("Minh da gui danh sach vao tin nhan rieng cua ban.")
+    except Forbidden:
+        username = get_settings().telegram_bot_username.strip().lstrip("@")
+        url = f"https://t.me/{username}?start=links_{request.request_token}" if username else ""
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Mo bot de nhan link", url=url)]]) if url else None
+        await query.message.reply_text("Ban can mo bot va bam Start de nhan link rieng.", reply_markup=keyboard)
+
+
+async def cleanlinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin.")
+        return
+    with _db() as db:
+        result = cleanup_expired_admin_links(db, preview=False)
+    await update.message.reply_text(f"Cleanup xong. Link tat: {result['links_deactivated']}, request het han: {result['requests_expired']}")
+
+
+async def cleanlinkspreview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin.")
+        return
+    with _db() as db:
+        result = cleanup_expired_admin_links(db, preview=True)
+    await update.message.reply_text(f"Preview cleanup. Link se tat: {result['links_deactivated']}, request het han: {result['requests_expired']}")
+
+
+async def linkstats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin.")
+        return
+    with _db() as db:
+        stats = admin_link_stats(db)
+    lines = [f"Tong link active: {stats['total']}", "Theo loai:"]
+    lines.extend(f"- {name}: {count}" for name, count in stats["by_type"])
+    lines.append("Theo danh muc:")
+    lines.extend(f"- {name}: {count}" for name, count in stats["by_category"])
+    batch = stats["latest_batch"]
+    lines.append(f"Batch gan nhat: #{batch.id} {batch.status} ({batch.link_count} link)" if batch else "Batch gan nhat: chua co")
+    lines.append(f"Sap het han: {stats['expiring']}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def viewlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dung: /viewlink <id>")
+        return
+    with _db() as db:
+        link = db.get(AdminAffiliateLink, int(context.args[0]))
+    if not link:
+        await update.message.reply_text("Khong tim thay link.")
+        return
+    await update.message.reply_text(
+        f"Link #{link.id}\n"
+        f"Ten: {link.display_name}\n"
+        f"Loai: {link_type_name(link.link_type_id)}\n"
+        f"Danh muc: {category_label(link.category_id)}\n"
+        f"Active: {bool(link.is_active)}\n"
+        f"Batch: #{link.batch_id}\n"
+        f"Het han: {link.expires_at}\n"
+        f"URL: {link.affiliate_url}",
+        disable_web_page_preview=True,
+    )
+
+
+async def deactivatelink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _set_admin_link_active(update, context, False)
+
+
+async def activatelink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _set_admin_link_active(update, context, True)
+
+
+async def _set_admin_link_active(update: Update, context: ContextTypes.DEFAULT_TYPE, active: bool) -> None:
+    if not _admin_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dung: /activatelink <id>" if active else "Dung: /deactivatelink <id>")
+        return
+    with _db() as db:
+        link = db.get(AdminAffiliateLink, int(context.args[0]))
+        if not link:
+            await update.message.reply_text("Khong tim thay link.")
+            return
+        link.is_active = 1 if active else 0
+        db.commit()
+    await update.message.reply_text("Da bat link." if active else "Da tat link.")
 
 
 async def importdaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2966,31 +3383,26 @@ def build_application() -> Application:
     init_db()
     if settings.enable_daily_link_auto_cleanup:
         cleanup_expired_daily_links(settings.daily_link_retention_days)
-    if not settings.vercel:
+    if settings.enable_daily_link_cleanup:
+        with _db() as db:
+            cleanup_expired_admin_links(db)
+    if not settings.vercel and settings.enable_csv_daily_import:
         run_startup_import_once()
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("links", links))
-    app.add_handler(CommandHandler("deal", links))
-    app.add_handler(CommandHandler("linkngay", links))
-    app.add_handler(CommandHandler("linkdates", links))
-    app.add_handler(CommandHandler("dealhomnay", links))
-    app.add_handler(CommandHandler("importdaily", importdaily))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("csv"), importdaily_document))
-    app.add_handler(CommandHandler("adddailylink", adddailylink))
-    app.add_handler(CommandHandler("adddailytext", adddailytext))
-    app.add_handler(CommandHandler("linktypes", linktypes))
-    app.add_handler(CommandHandler("dailystats", dailystats))
-    app.add_handler(CommandHandler("recategorize", recategorize))
-    app.add_handler(CommandHandler("retype", retype))
-    app.add_handler(CommandHandler("viewproduct", viewproduct))
-    app.add_handler(CommandHandler("deactivatedaily", deactivatedaily))
-    app.add_handler(CommandHandler("activatedaily", activatedaily))
-    app.add_handler(CommandHandler("senddaily", senddaily))
-    app.add_handler(CommandHandler("sendtoday", sendtoday))
-    app.add_handler(CommandHandler("cleanuppreview", cleanuppreview))
-    app.add_handler(CommandHandler("cleanupdaily", cleanupdaily))
+    app.add_handler(CommandHandler("links", admin_links_menu))
+    app.add_handler(CommandHandler("docquyen", docquyen))
+    app.add_handler(CommandHandler("linkbatch", linkbatch))
+    app.add_handler(CommandHandler("endlinkbatch", endlinkbatch))
+    app.add_handler(CommandHandler("cancellinkbatch", cancellinkbatch))
+    app.add_handler(CommandHandler("currentlinkbatch", currentlinkbatch))
+    app.add_handler(CommandHandler("linkstats", linkstats))
+    app.add_handler(CommandHandler("cleanlinks", cleanlinks))
+    app.add_handler(CommandHandler("cleanlinkspreview", cleanlinkspreview))
+    app.add_handler(CommandHandler("viewlink", viewlink))
+    app.add_handler(CommandHandler("deactivatelink", deactivatelink))
+    app.add_handler(CommandHandler("activatelink", activatelink))
     app.add_handler(CommandHandler("accounts", accounts))
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("features", features))
@@ -2998,6 +3410,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("engagepost", engagepost))
     app.add_handler(CallbackQueryHandler(choose_engagement_persona, pattern=r"^engage_persona:(daily|controversial|advisor)$"))
     app.add_handler(CallbackQueryHandler(choose_engagement_mode, pattern=r"^engage_mode:(viral|advice|ask|quote|observation)$"))
+    app.add_handler(CallbackQueryHandler(choose_batch_type, pattern=r"^ac:bt:(sh|xt|pc|ex)$"))
+    app.add_handler(CallbackQueryHandler(choose_batch_category, pattern=r"^ac:bc:(sh|xt|pc|ex):[a-z_]+$"))
+    app.add_handler(CallbackQueryHandler(request_type_callback, pattern=r"^ac:rt:\d+:(sh|xt|pc|ex)$"))
+    app.add_handler(CallbackQueryHandler(request_category_callback, pattern=r"^ac:rc:\d+:(sh|xt|pc|ex):[a-z_]+$"))
+    app.add_handler(CallbackQueryHandler(guide_links_callback, pattern=r"^ac:(docq|links)$"))
     app.add_handler(CallbackQueryHandler(daily_date_callback, pattern=r"^dl:d:\d{8}$"))
     app.add_handler(CallbackQueryHandler(daily_type_callback, pattern=r"^dl:t:\d{8}:(sh|xt|pc|ex)$"))
     app.add_handler(CallbackQueryHandler(daily_category_callback, pattern=r"^dl:c:\d{8}:(sh|xt|pc|ex):[a-z_]+$"))
@@ -3014,6 +3431,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("post", post_to_threads))
     app.add_handler(CommandHandler("retrytelegramcta", retrytelegramcta))
     app.add_handler(CommandHandler("delete", delete))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ingest_admin_link_message))
     for command in FROZEN_COMMANDS:
         app.add_handler(CommandHandler(command, frozen_command))
     return app
