@@ -2393,6 +2393,19 @@ def _admin_group_required(update: Update) -> bool:
     return _admin_required(update) and _group_required(update)
 
 
+def _admin_group_denied_text(update: Update) -> str:
+    user = update.effective_user
+    chat = update.effective_chat
+    settings = get_settings()
+    return (
+        "Lenh nay chi danh cho admin trong group cau hinh.\n"
+        f"user_id hien tai: {user.id if user else 'unknown'}\n"
+        f"chat_id hien tai: {chat.id if chat else 'unknown'}\n"
+        f"admin_ids cau hinh: {settings.telegram_admin_user_ids or 'chua dat'}\n"
+        f"group_id cau hinh: {settings.telegram_community_group_id or 'chua dat'}"
+    )
+
+
 def _link_type_buttons(prefix: str, user_id: int | None = None) -> InlineKeyboardMarkup:
     rows = []
     for item in load_link_types():
@@ -2545,7 +2558,7 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def linkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_group_required(update):
-        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        await update.message.reply_text(_admin_group_denied_text(update))
         return
     with _db() as db:
         cleanup_expired_admin_links(db)
@@ -2626,7 +2639,7 @@ async def ingest_admin_link_message(update: Update, context: ContextTypes.DEFAUL
 
 async def endlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_group_required(update):
-        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        await update.message.reply_text(_admin_group_denied_text(update))
         return
     with _db() as db:
         batch = admin_close_batch(db, update.effective_user.id, update.effective_chat.id, "completed")
@@ -2648,7 +2661,7 @@ async def endlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cancellinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_group_required(update):
-        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        await update.message.reply_text(_admin_group_denied_text(update))
         return
     with _db() as db:
         batch = admin_close_batch(db, update.effective_user.id, update.effective_chat.id, "cancelled")
@@ -2657,7 +2670,7 @@ async def cancellinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def currentlinkbatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_group_required(update):
-        await update.message.reply_text("Lenh nay chi danh cho admin trong group cau hinh.")
+        await update.message.reply_text(_admin_group_denied_text(update))
         return
     with _db() as db:
         batch = admin_active_batch_for_admin(db, update.effective_user.id, update.effective_chat.id)
