@@ -16,7 +16,7 @@ import app.services.hook_library as hook_library
 from app.services.persona_library import select_persona
 import app.services.persona_library as persona_library
 from app.services.product_scoring import score_products
-from app.services.daily_link_catalog import build_category_message, category_counts, parse_import_date
+from app.services.daily_link_catalog import build_category_message, category_counts, parse_import_date, resolve_import_date
 from app.services import daily_link_cleanup
 from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
 from app.services.telegram_cta_generator import generate_telegram_cta
@@ -570,6 +570,8 @@ def test_parse_import_date_accepts_local_formats() -> None:
     assert parse_import_date("2026-01-01") == "2026-01-01"
     assert parse_import_date("29/02/2024") == "2024-02-29"
     assert parse_import_date("20260711160405") == "2026-07-11"
+    assert resolve_import_date("upload.tmp", "file20260711160341.csv") == "2026-07-11"
+    assert resolve_import_date("file20260711160341.csv", "not-a-date") == "2026-07-11"
 
 
 def test_platform_url_parser_threads_url() -> None:

@@ -63,6 +63,20 @@ def infer_import_date_from_path(csv_path: str | Path) -> str | None:
         return None
 
 
+def resolve_import_date(csv_path: str | Path, import_date: str | None = None) -> str:
+    if import_date:
+        try:
+            return parse_import_date(import_date)
+        except ValueError:
+            inferred_from_arg = infer_import_date_from_path(import_date)
+            if inferred_from_arg:
+                return inferred_from_arg
+    inferred_from_path = infer_import_date_from_path(csv_path)
+    if inferred_from_path:
+        return inferred_from_path
+    return parse_import_date(None)
+
+
 def display_date(value: str) -> str:
     parsed = datetime.strptime(value, "%Y-%m-%d").date()
     return parsed.strftime("%d/%m/%Y")
@@ -103,7 +117,7 @@ def classify_product(name: str, shop_name: str = "") -> str:
 
 
 def import_daily_csv(db: Session, csv_path: str | Path, import_date: str | None = None) -> DailyImportResult:
-    target_date = parse_import_date(import_date) if import_date else (infer_import_date_from_path(csv_path) or parse_import_date(None))
+    target_date = resolve_import_date(csv_path, import_date)
     path = Path(csv_path)
     total_rows = 0
     new_products = 0
