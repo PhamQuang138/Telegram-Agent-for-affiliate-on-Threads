@@ -19,6 +19,7 @@ def match_products_for_demand(
     if not query_tokens:
         return []
     price_max = constraints.get("price_max")
+    price_min = constraints.get("price_min")
     with SessionLocal() as db:
         links = list(db.scalars(select(ThreadsPostLink).order_by(ThreadsPostLink.id.desc()).limit(1000)))
 
@@ -42,7 +43,9 @@ def match_products_for_demand(
             if price <= price_max:
                 score += 10
             elif price > price_max * 1.35:
-                score -= 18
+                continue
+        if price_min and price and price < price_min * 0.65:
+            score -= 8
         for feature in constraints.get("features") or []:
             if set(_tokens(feature)) & product_tokens:
                 score += 4

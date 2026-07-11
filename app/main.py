@@ -3,7 +3,7 @@ import threading
 import uvicorn
 
 from app.config import get_settings
-from app.services.threads_analytics_scheduler import start_background_sync
+from app.services.feature_flags import is_feature_enabled
 from app.telegram_bot import build_application
 
 
@@ -13,9 +13,18 @@ def run_api() -> None:
 
 
 def main() -> None:
+    settings = get_settings()
+    if settings.vercel:
+        return
+    if settings.telegram_use_webhook:
+        run_api()
+        return
     api_thread = threading.Thread(target=run_api, daemon=True)
     api_thread.start()
-    start_background_sync()
+    if is_feature_enabled("threads_background_sync"):
+        from app.services.threads_analytics_scheduler import start_background_sync
+
+        start_background_sync()
     build_application().run_polling()
 
 

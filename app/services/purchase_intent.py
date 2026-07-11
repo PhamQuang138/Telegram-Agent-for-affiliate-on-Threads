@@ -8,6 +8,10 @@ ASK_WHERE = ["mua ở đâu", "mua o dau", "mua chỗ nào", "mua cho nao", "sho
 ASK_RECOMMEND = ["recommend", "gợi ý", "goi y", "nên mua loại nào", "nen mua loai nao", "tư vấn", "tu van", "loại nào ổn", "loai nao on", "có mẫu nào", "co mau nao"]
 ASK_PRICE = ["bao nhiêu tiền", "bao nhieu tien", "giá bao nhiêu", "gia bao nhieu", "dưới", "duoi", "ngân sách", "ngan sach", "budget"]
 PRODUCT_SEARCH = ["đang tìm", "dang tim", "cần tìm", "can tim", "tìm giúp", "tim giup", "có ai biết", "co ai biet"]
+COMPARE = ["loại nào hơn", "loai nao hon", "nên chọn", "nen chon", "so sánh", "so sanh", "bản nào phù hợp", "ban nao phu hop"]
+GIFT = ["mua quà gì", "mua qua gi", "tặng gì", "tang gi", "quà cho", "qua cho", "budget quà", "budget qua"]
+PROBLEM = ["bị", "bi", "khó chịu", "kho chiu", "đau đầu", "dau dau", "cần món", "can mon"]
+WISHLIST = ["wishlist", "muốn mua", "muon mua", "đang ngắm", "dang ngam"]
 BOUGHT_DONE = ["mới mua", "moi mua", "vừa mua", "vua mua", "đã mua", "da mua", "chốt đơn", "chot don"]
 SELLER_SPAM = ["tuyển cộng tác viên", "tuyen cong tac vien", "sỉ lẻ", "si le", "inbox shop", "khách sỉ", "khach si", "nhận order", "nhan order"]
 SENSITIVE = ["thuốc", "thuoc", "vay tiền", "vay tien", "cờ bạc", "co bac", "18+"]
@@ -36,8 +40,14 @@ def classify_purchase_intent(text: str, matched_keyword: str | None = None) -> d
         intent, score = "ask_price", 78
     elif _contains(normalized, PRODUCT_SEARCH):
         intent, score = "product_search", 74
-    elif any(token in normalized for token in ["nên chọn", "nen chon", "so sánh", "so sanh"]):
+    elif _contains(normalized, COMPARE):
         intent, score = "compare_products", 72
+    elif _contains(normalized, GIFT):
+        intent, score = "gift_search", 78
+    elif _contains(normalized, WISHLIST):
+        intent, score = "wishlist", 70
+    elif _contains(normalized, PROBLEM) and category:
+        intent, score = "product_problem", 68
 
     if constraints.get("price_max") and score:
         score += 3
@@ -83,7 +93,11 @@ def _constraints(text: str) -> dict:
         if word in text:
             use_case = word
             break
-    return {"price_min": None, "price_max": price_max, "use_case": use_case, "audience": audience, "features": features[:5]}
+    price_min = None
+    min_match = re.search(r"(?:từ|tu|trên|tren)\s*(\d+)\s*k", text)
+    if min_match:
+        price_min = int(min_match.group(1)) * 1000
+    return {"price_min": price_min, "price_max": price_max, "use_case": use_case, "audience": audience, "features": features[:5]}
 
 
 def _category(text: str, keyword: str) -> str:

@@ -1,9 +1,10 @@
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, ThreadsDemandAction, ThreadsDemandOpportunity, ThreadsPost, ThreadsPostLink, ThreadsPostMetric, ThreadsReply
+from app.models import Base, AffiliateProduct, DailyLinkEntry, DemandOpportunity, ThreadsDemandAction, ThreadsDemandOpportunity, ThreadsPost, ThreadsPostLink, ThreadsPostMetric, ThreadsReply
 from app.services.angle_library import select_angle
 import app.services.angle_library as angle_library
 from app.services.content_diversity import should_reduce_repetition
@@ -15,10 +16,16 @@ import app.services.hook_library as hook_library
 from app.services.persona_library import select_persona
 import app.services.persona_library as persona_library
 from app.services.product_scoring import score_products
+from app.services.daily_link_catalog import build_category_message, category_counts, parse_import_date
+from app.services import daily_link_cleanup
 from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
+from app.services.telegram_cta_generator import generate_telegram_cta
 from app.services.reply_analysis import analyze_reply, calculate_purchase_intent_score
 from app.services import demand_product_matcher, threads_analytics_scheduler, threads_demand_scanner, threads_insights_service, threads_reply_service, threads_sync_service, trend_service
 from app.services.demand_comment_generator import generate_demand_comment
+from app.services import manual_demand_intake
+from app.services.feature_flags import is_feature_enabled
+from app.services.platform_url_parser import parse_platform_url
 from app.services.purchase_intent import classify_purchase_intent
 from app.services.trend_service import GoogleSuggestProvider
 from app.services import learning_engine
@@ -496,6 +503,130 @@ def test_scheduler_does_not_overlap() -> None:
     assert not result["started"]
 
 
+def test_feature_flags_default_freeze() -> None:
+    assert is_feature_enabled("daily_link_catalog")
+    assert is_feature_enabled("threads_engagement_posts")
+    assert not is_feature_enabled("manual_demand_intake")
+    assert not is_feature_enabled("purchase_intent")
+    assert not is_feature_enabled("learning_engine")
+    assert not is_feature_enabled("threads_background_sync")
+
+
+def test_daily_cleanup_keeps_four_days_and_preview(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(daily_link_cleanup, "SessionLocal", Session)
+
+    with Session() as db:
+        for index, import_date in enumerate(["2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-11"], start=1):
+            product = AffiliateProduct(product_name=f"Product {index}", affiliate_url=f"https://s.shopee.vn/{index}", category_id="home")
+            db.add(product)
+            db.flush()
+            db.add(DailyLinkEntry(product_id=product.id, import_date=import_date))
+        db.commit()
+
+    preview = daily_link_cleanup.cleanup_expired_daily_links(retention_days=4, reference_date=daily_link_cleanup.date(2026, 7, 11), preview=True)
+    assert preview["cutoff_date"] == "2026-07-08"
+    assert preview["entries_deleted"] == 1
+    with Session() as db:
+        assert db.query(DailyLinkEntry).count() == 5
+
+    result = daily_link_cleanup.cleanup_expired_daily_links(retention_days=4, reference_date=daily_link_cleanup.date(2026, 7, 11))
+    assert result["entries_deleted"] == 1
+    with Session() as db:
+        dates = [row.import_date for row in db.query(DailyLinkEntry).order_by(DailyLinkEntry.import_date).all()]
+    assert dates == ["2026-07-08", "2026-07-09", "2026-07-10", "2026-07-11"]
+
+
+def test_daily_category_message_and_counts_ignore_inactive() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    with Session() as db:
+        active = AffiliateProduct(product_name="Quat mini de ban", affiliate_url="https://s.shopee.vn/a", price="79000", category_id="home", is_active=1)
+        inactive = AffiliateProduct(product_name="Ke bep", affiliate_url="https://s.shopee.vn/b", category_id="home", is_active=0)
+        db.add_all([active, inactive])
+        db.flush()
+        db.add_all([DailyLinkEntry(product_id=active.id, import_date="2024-02-29"), DailyLinkEntry(product_id=inactive.id, import_date="2024-02-29")])
+        db.commit()
+        counts = category_counts(db, "2024-02-29")
+        messages = build_category_message("2024-02-29", "home", [active])
+    assert counts[0]["count"] == 1
+    assert "Quat mini de ban" in messages[0]
+    assert "https://s.shopee.vn/a" in messages[0]
+
+
+def test_telegram_cta_contains_group_url_and_avoids_recent() -> None:
+    group_url = "https://t.me/example_group"
+    recent = [generate_telegram_cta({}, group_url, [])]
+    cta = generate_telegram_cta({"keyword": "ao the thao"}, group_url, recent)
+    assert group_url in cta
+    assert "s.shopee.vn" not in cta
+    assert cta not in recent
+
+
+def test_parse_import_date_accepts_local_formats() -> None:
+    assert parse_import_date("2026-01-01") == "2026-01-01"
+    assert parse_import_date("29/02/2024") == "2024-02-29"
+    assert parse_import_date("20260711160405") == "2026-07-11"
+
+
+def test_platform_url_parser_threads_url() -> None:
+    parsed = parse_platform_url("https://www.threads.com/@abc/post/XYZ?x=1")
+    assert parsed["valid"]
+    assert parsed["platform"] == "threads"
+    assert parsed["username"] == "abc"
+    assert parsed["external_content_id"] == "XYZ"
+    assert "?" not in parsed["normalized_url"]
+
+
+def test_manual_demand_url_only_does_not_scrape() -> None:
+    result = manual_demand_intake.create_manual_demand("", url="https://www.threads.com/@abc/post/XYZ")
+    assert not result["created"]
+    assert "cannot scrape" in result["reason"]
+
+
+def test_manual_demand_text_only_creates_manual_copy(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(manual_demand_intake, "SessionLocal", Session)
+    monkeypatch.setattr(demand_product_matcher, "SessionLocal", Session)
+    with Session() as db:
+        post = ThreadsPost(keyword="catalog", product_name="p", content="c", cta="", hashtags="[]", status="posted", quality_score=0)
+        db.add(post)
+        db.flush()
+        db.add(ThreadsPostLink(post_id=post.id, product_name="Quạt mini để bàn dưới 200k", affiliate_url="https://s.shopee.vn/quat", price="150000", tracking_url="t1", slug="s1"))
+        db.commit()
+    result = manual_demand_intake.create_manual_demand("Cho mình xin link quạt mini để bàn dưới 200k")
+    assert result["created"]
+    assert result["response_mode"] == "manual_copy"
+    assert not result["can_api_reply"]
+    with Session() as db:
+        assert db.query(DemandOpportunity).count() == 1
+
+
+def test_manual_demand_duplicate_by_url(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(manual_demand_intake, "SessionLocal", Session)
+    monkeypatch.setattr(demand_product_matcher, "SessionLocal", Session)
+    with Session() as db:
+        post = ThreadsPost(keyword="catalog", product_name="p", content="c", cta="", hashtags="[]", status="posted", quality_score=0)
+        db.add(post)
+        db.flush()
+        db.add(ThreadsPostLink(post_id=post.id, product_name="Quạt mini để bàn", affiliate_url="https://s.shopee.vn/quat", price="150000", tracking_url="t1", slug="s1"))
+        db.commit()
+    url = "https://www.threads.com/@abc/post/XYZ?utm=1"
+    first = manual_demand_intake.create_manual_demand("xin link quạt mini để bàn", url=url)
+    second = manual_demand_intake.create_manual_demand("xin link quạt mini để bàn", url=url)
+    assert first["created"]
+    assert not second["created"]
+    assert second["reason"] == "duplicate"
+
+
 def test_purchase_intent_rules_and_price_extract() -> None:
     ask_link = classify_purchase_intent("Cho mình xin link quạt mini để bàn dưới 200k với", "quạt mini")
     reco = classify_purchase_intent("Mọi người recommend áo đá bóng loại nào ổn?", "áo đá bóng")
@@ -693,3 +824,96 @@ def test_daily_limit_blocks_reply(monkeypatch) -> None:
     ok, message = threads_demand_scanner.reply_opportunity(1, "acc1")
     assert not ok
     assert "daily" in message
+
+
+def test_telegram_webhook_rejects_invalid_secret(monkeypatch) -> None:
+    import app.api as api_module
+    import app.config as config_module
+
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "secret")
+    config_module.get_settings.cache_clear()
+
+    async def fake_process(payload):
+        raise AssertionError("should not process invalid webhook")
+
+    monkeypatch.setattr(api_module, "process_telegram_update", fake_process)
+    client = TestClient(api_module.app)
+    response = client.post("/api/telegram/webhook", json={"update_id": 1}, headers={"X-Telegram-Bot-Api-Secret-Token": "bad"})
+    assert response.status_code == 401
+
+
+def test_telegram_webhook_accepts_valid_secret(monkeypatch) -> None:
+    import app.api as api_module
+    import app.config as config_module
+
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "secret")
+    config_module.get_settings.cache_clear()
+    seen = {}
+
+    async def fake_process(payload):
+        seen["payload"] = payload
+
+    monkeypatch.setattr(api_module, "process_telegram_update", fake_process)
+    client = TestClient(api_module.app)
+    response = client.post("/api/telegram/webhook", json={"update_id": 1}, headers={"X-Telegram-Bot-Api-Secret-Token": "secret"})
+    assert response.status_code == 200
+    assert seen["payload"]["update_id"] == 1
+
+
+def test_cleanup_cron_requires_secret(monkeypatch) -> None:
+    import app.api as api_module
+    import app.config as config_module
+
+    monkeypatch.setenv("CRON_SECRET", "cron")
+    config_module.get_settings.cache_clear()
+    client = TestClient(api_module.app)
+    assert client.get("/api/cron/cleanup-daily-links").status_code == 401
+
+
+def test_cleanup_cron_accepts_bearer_secret(monkeypatch) -> None:
+    import app.api as api_module
+    import app.config as config_module
+
+    monkeypatch.setenv("CRON_SECRET", "cron")
+    config_module.get_settings.cache_clear()
+    monkeypatch.setattr(api_module, "cleanup_expired_daily_links", lambda retention_days: {"cutoff_date": "2026-07-08", "entries_deleted": 0})
+    client = TestClient(api_module.app)
+    response = client.get("/api/cron/cleanup-daily-links", headers={"Authorization": "Bearer cron"})
+    assert response.status_code == 200
+    assert response.json()["cutoff_date"] == "2026-07-08"
+
+
+def test_main_vercel_does_not_start_polling(monkeypatch) -> None:
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: SimpleNamespace(vercel=True, telegram_use_webhook=False))
+    monkeypatch.setattr(main_module, "run_api", lambda: (_ for _ in ()).throw(AssertionError("api should not run in vercel import mode")))
+    monkeypatch.setattr(main_module, "build_application", lambda: (_ for _ in ()).throw(AssertionError("polling should not start on vercel")))
+    assert main_module.main() is None
+
+
+def test_main_local_polling_still_runs(monkeypatch) -> None:
+    import app.main as main_module
+
+    class DummyThread:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            return None
+
+    class DummyApp:
+        def __init__(self):
+            self.polled = False
+
+        def run_polling(self):
+            self.polled = True
+
+    dummy = DummyApp()
+    monkeypatch.setattr(main_module, "get_settings", lambda: SimpleNamespace(vercel=False, telegram_use_webhook=False, tracking_port=8000))
+    monkeypatch.setattr(main_module.threading, "Thread", DummyThread)
+    monkeypatch.setattr(main_module, "is_feature_enabled", lambda name: False)
+    monkeypatch.setattr(main_module, "build_application", lambda: dummy)
+    main_module.main()
+    assert dummy.polled

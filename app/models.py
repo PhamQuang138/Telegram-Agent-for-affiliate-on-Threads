@@ -39,6 +39,11 @@ class ThreadsPost(Base):
     threads_post_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     posted_account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     posted_account_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_cta_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    telegram_cta_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    telegram_cta_reply_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_cta_posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    telegram_cta_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -106,6 +111,47 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_at: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class AffiliateProduct(Base):
+    __tablename__ = "affiliate_products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    affiliate_url: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    shop_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    category_id: Mapped[str] = mapped_column(String(64), nullable=False, default="other", index=True)
+    subcategory: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class DailyLinkEntry(Base):
+    __tablename__ = "daily_link_entries"
+    __table_args__ = (UniqueConstraint("product_id", "import_date", name="uq_daily_link_product_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("affiliate_products.id"), nullable=False, index=True)
+    import_date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    batch_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("affiliate_import_batches.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AffiliateImportBatch(Base):
+    __tablename__ = "affiliate_import_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    import_date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    total_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    imported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ThreadsPostMetric(Base):
@@ -209,6 +255,50 @@ class ThreadsDemandOpportunity(Base):
 
 class ThreadsDemandAction(Base):
     __tablename__ = "threads_demand_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    result: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    details: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class DemandOpportunity(Base):
+    __tablename__ = "demand_opportunities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(64), nullable=False, default="threads", index=True)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False, default="post")
+    external_content_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_text_excerpt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    matched_query: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    intent: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    purchase_intent_score: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    category: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    normalized_query: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    matched_products_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    suggested_response: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    response_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="manual_copy")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="new", index=True)
+    intake_source: Mapped[str] = mapped_column(String(64), nullable=False, default="telegram_manual", index=True)
+    scan_account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reply_account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_reply_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DemandAction(Base):
+    __tablename__ = "demand_actions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     opportunity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)

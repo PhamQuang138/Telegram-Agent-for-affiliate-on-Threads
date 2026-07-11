@@ -40,3 +40,5 @@ note.txt
 Thumbs.db
 .idea/
 .vscode/
+.vercel
+.env*

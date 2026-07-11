@@ -1,6 +1,19 @@
-# POD Bot - Threads Shopee Affiliate Bot
+# POD Bot - Threads To Telegram Affiliate Bot
 
-POD Bot is a Python Telegram bot for creating Vietnamese Threads posts for Shopee affiliate campaigns. It can import Shopee affiliate CSV files, generate draft posts, attach 3-5 catalog links, publish to Threads, post affiliate links as replies, and track clicks through a local FastAPI redirect endpoint.
+POD Bot is a Python/FastAPI Telegram bot for running a simple Threads -> Telegram affiliate funnel.
+
+Current product scope:
+
+```text
+Threads engagement post
+-> Telegram group CTA reply
+-> Telegram daily link catalog
+-> choose date
+-> choose category
+-> receive Shopee affiliate links
+```
+
+Older demand scanner, purchase opportunity, learning, trend, and cross-platform features are frozen by default. See `docs/FROZEN_FEATURES.md`.
 
 The Python/FastAPI app is the primary implementation. The older TypeScript source is still in the repository for reference, but the recommended runtime is:
 
@@ -13,9 +26,9 @@ python -m app.main
 - [Features](#features)
 - [Setup](#setup)
 - [Run](#run)
+- [Deploy On Vercel](#deploy-on-vercel)
 - [Telegram Commands](#telegram-commands)
-- [AI Affiliate Content Engine](#ai-affiliate-content-engine)
-- [Trend Collection Engine](#trend-collection-engine)
+- [Daily Link Catalog](#daily-link-catalog)
 - [Content Libraries](#content-libraries)
 - [Diversity And Topic Memory](#diversity-and-topic-memory)
 - [Shopee Draft Generation](#shopee-draft-generation)
@@ -27,21 +40,14 @@ python -m app.main
 
 ## Features
 
-- Generate Vietnamese Threads drafts for Shopee affiliate products.
-- Generate drafts through a Need -> Persona -> Angle -> Story content pipeline.
-- Collect trend keywords from safe local sources such as catalog data, click history, seasonality, and seed keywords.
-- Create engagement-only posts without product links.
-- Choose engagement personas and content modes.
-- Auto-match catalog links from the local database.
-- Group 3-5 Shopee links into one post and one bundled reply comment.
-- Import and de-duplicate Shopee affiliate CSV files.
-- Queue, preview, approve, regenerate, delete, and post drafts from Telegram.
-- Post to Threads through the official Threads API.
+- Maintain a Telegram daily link catalog with date and category menus.
+- Import and de-duplicate Shopee affiliate CSV files by day.
+- Keep only the latest 4 daily catalog dates by default.
+- Send category link lists into a configured Telegram group.
+- Generate and publish Threads engagement posts.
+- Reply to Threads engagement posts with a Telegram group CTA.
 - Track clicks through `GET /go/{slug}` and store analytics in SQLite.
-- Sync official Threads metrics, replies, mentions, and keyword-search signals when token permissions allow it.
-- Learn separate content strategy profiles per Threads account.
-- Scan public Threads keyword-search results for purchase demand, create affiliate reply opportunities, and wait for manual approval before replying.
-- Rotate AI providers/models with cooldowns for quota, rate limits, and temporary provider failures.
+- Freeze scanner, opportunity, learning, trend, and cross-platform modules by default.
 
 ## Setup
 
@@ -61,6 +67,11 @@ Fill in the values you need:
 
 ```env
 TELEGRAM_BOT_TOKEN=
+TELEGRAM_USE_WEBHOOK=false
+TELEGRAM_WEBHOOK_URL=https://podbot-snowy.vercel.app/api/telegram/webhook
+TELEGRAM_WEBHOOK_SECRET=
+VERCEL=false
+CRON_SECRET=
 
 BASE_URL=http://localhost:8000
 DATABASE_URL=sqlite:///./affiliate_agent.db
@@ -87,6 +98,22 @@ THREADS_API_BASE_URL=https://graph.threads.net/v1.0
 INCLUDE_TRACKING_LINK_IN_THREADS=false
 POST_TRACKING_LINK_AS_REPLY=true
 COMMENT_LINK_TARGET=affiliate
+
+ENABLE_DAILY_LINK_CATALOG=true
+ENABLE_THREADS_ENGAGEMENT_POSTS=true
+ENABLE_TELEGRAM_GROUP=true
+ENABLE_DAILY_LINK_AUTO_CLEANUP=true
+TELEGRAM_COMMUNITY_GROUP_ID=
+TELEGRAM_GROUP_INVITE_URL=
+TELEGRAM_GROUP_DISPLAY_NAME=Nhom link uu dai
+TELEGRAM_DAILY_LINK_DISCLOSURE=Cac link tren la link tiep thi lien ket.
+DAILY_LINK_RETENTION_DAYS=4
+DAILY_LINK_TIMEZONE=Asia/Bangkok
+DAILY_LINK_DELETE_ORPHAN_PRODUCTS=true
+THREADS_INCLUDE_TELEGRAM_CTA=true
+THREADS_TELEGRAM_CTA_MODE=reply
+THREADS_TELEGRAM_GROUP_URL=
+THREADS_TELEGRAM_GROUP_NAME=nhom link uu dai
 
 IMPORT_EXTERNAL_THREADS_POSTS=false
 THREADS_ANALYTICS_SYNC_ENABLED=true
@@ -151,62 +178,202 @@ GET /go/{slug}
 
 Clicks are stored in SQLite. IP addresses are hashed with SHA-256 before storage, then the user is redirected to the Shopee affiliate URL.
 
+## Deploy On Vercel
+
+The Vercel entrypoint is:
+
+```text
+api/index.py
+```
+
+It exposes the FastAPI app only. It does not run `uvicorn`, Telegram polling, or background schedulers.
+
+Set these Vercel environment variables:
+
+```env
+VERCEL=true
+TELEGRAM_USE_WEBHOOK=true
+TELEGRAM_WEBHOOK_URL=https://podbot-snowy.vercel.app/api/telegram/webhook
+TELEGRAM_WEBHOOK_SECRET=<random-secret>
+CRON_SECRET=<random-secret>
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE
+TELEGRAM_BOT_TOKEN=
+THREADS_ACCOUNTS=acc1,acc2
+THREADS_ACC1_USER_ID=
+THREADS_ACC1_ACCESS_TOKEN=
+THREADS_ACC2_USER_ID=
+THREADS_ACC2_ACCESS_TOKEN=
+TELEGRAM_COMMUNITY_GROUP_ID=@uudaispextra
+TELEGRAM_GROUP_INVITE_URL=https://t.me/uudaispextra
+THREADS_TELEGRAM_GROUP_URL=https://t.me/uudaispextra
+```
+
+After deploy, set the Telegram webhook:
+
+```bash
+python scripts/set_telegram_webhook.py --drop-pending-updates
+```
+
+To return to local polling:
+
+```bash
+python scripts/delete_telegram_webhook.py --drop-pending-updates
+```
+
+Then set local `.env`:
+
+```env
+TELEGRAM_USE_WEBHOOK=false
+VERCEL=false
+DATABASE_URL=sqlite:///./affiliate_agent.db
+```
+
+Useful endpoints:
+
+```text
+GET /api/health
+POST /api/telegram/webhook
+GET /api/cron/cleanup-daily-links
+```
+
+`vercel.json` schedules daily cleanup once per day. The cron endpoint accepts `Authorization: Bearer <CRON_SECRET>`, `X-Cron-Secret`, or `?secret=...`.
+
 ## Telegram Commands
 
 ```text
 /start
 /help
 
-/threads_shopee <keyword or Shopee affiliate link>
-/contentdraft <keyword>
-/autodrafts [limit] [keyword]
 /engagepost <topic>
-/trends
-/trenddrafts [limit]
-/trenddrafts <keyword>
-/ideadrafts [limit] [keyword]
-/performance
-/ideas [keyword]
 /accounts
-/syncposts [account_name]
-/syncinsights [account_name]
-/syncreplies [account_name]
-/threadstats <post_id>
-/accountperformance <account_name>
-/threadtrends <keyword>
-/mentions [account_name]
-/replysuggestions <post_id>
-/scanthreads [keyword] [account_name]
-/buyops [limit]
-/buyop <id>
-/approvebuy <id>
-/approvebuybatch <id1,id2,id3>
-/editbuy <id> <comment>
-/skipbuy <id>
-/replybuy <id> [account_name]
-/replybuybatch <id1,id2,id3> [account_name]
+/chatid
+/features
 
-/importcsv <csv_path> [group_size]
-/updatelink <csv_path> [group_size]
-/confirmupdate
-/cancelupdate
+/links
+/deal
+/linkngay
+/linkdates
+/dealhomnay
+
+/importdaily <csv_path> [date]
+/adddailylink <url> | <name> | <price>
+/adddailytext
+/dailystats [date]
+/recategorize <link_id> <category_id>
+/deactivatedaily <link_id>
+/activatedaily <link_id>
+/senddaily <date> <category_id>
+/sendtoday
+/cleanuppreview
+/cleanupdaily
 
 /queue
-/status
-/modelstatus
-/checkmodels [limit]
 /view <post_id>
 /regenerate <post_id>
-/refreshdrafts [limit]
-
-/addlink <post_id> <shopee_affiliate_link>
 /approve <post_id>
 /post <post_id> [account_name]
-/replylinks <post_id>
-/delete_thread <post_id> confirm
+/retrytelegramcta <post_id>
 /delete <post_id>
-/analytics
+
+/threads_shopee <keyword or Shopee affiliate link>
 ```
+
+Frozen commands return a short frozen-feature message instead of running the old workflow.
+
+## Daily Link Catalog
+
+Import links for today:
+
+```text
+/importdaily shopee.csv
+```
+
+Import links for a specific date:
+
+```text
+/importdaily shopee.csv 2026-07-11
+```
+
+Add one link manually:
+
+```text
+/adddailylink https://s.shopee.vn/xxx | Quat mini de ban | 79000
+```
+
+Show the public menu:
+
+```text
+/links
+/linkdates
+/dealhomnay
+```
+
+The bot shows up to 4 recent dates, then category buttons with counts. When a category is selected, the bot sends that category's affiliate links to `TELEGRAM_COMMUNITY_GROUP_ID`.
+
+Cleanup runs on startup and after daily imports/adds when `ENABLE_DAILY_LINK_AUTO_CLEANUP=true`.
+
+```text
+/cleanuppreview
+/cleanupdaily
+```
+
+Daily catalog tables:
+
+```text
+affiliate_products
+daily_link_entries
+affiliate_import_batches
+```
+
+## Frozen Features
+
+The code for older modules remains in the repository, but these features are disabled by default:
+
+- Learning engine and account learning profiles.
+- Persona, hook, CTA, topic optimizers.
+- Trend fusion and Google/Threads trend providers.
+- Background Threads analytics and reply sync.
+- Automatic Threads keyword scanner.
+- Cross-platform publishing and marketplace intelligence.
+
+Check current flags:
+
+```text
+/features
+```
+
+## Human-Assisted Demand Intake
+
+Create an opportunity from a Threads URL and copied post text:
+
+```text
+/adddemand https://www.threads.com/@abc/post/xyz Mọi người có quạt mini nào để bàn dưới 200k không, cho mình xin link với
+```
+
+Text-only intake is supported, but it can only use manual copy because there is no external Threads post ID:
+
+```text
+/adddemandtext Cho mình xin link áo khoác nam mặc đi làm với
+```
+
+The bot never fetches or scrapes the URL. If you send only a URL, it will ask for the post text.
+
+## Manual Copy Fallback
+
+When API reply is not possible because of missing permission, token issues, or text-only intake, use:
+
+```text
+/copybuy <id>
+/approveandcopy <id>
+```
+
+## Opportunity Analytics
+
+```text
+/opstats
+```
+
+Shows total opportunities, approved/replied/manual-copied/skipped/expired counts, total clicks, top intents, and top categories.
 
 ## AI Affiliate Content Engine
 

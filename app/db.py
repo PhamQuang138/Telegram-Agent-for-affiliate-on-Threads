@@ -1,6 +1,7 @@
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -10,12 +11,25 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_engine(
-    get_settings().database_url,
-    connect_args={"check_same_thread": False}
+def _normalized_database_url() -> str:
+    url = get_settings().database_url
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url.removeprefix("postgres://")
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url.removeprefix("postgresql://")
+    return url
+
+
+_engine_kwargs = {
+    "connect_args": {"check_same_thread": False}
     if get_settings().database_url.startswith("sqlite")
     else {},
-)
+    "pool_pre_ping": True,
+}
+if get_settings().vercel:
+    _engine_kwargs["poolclass"] = NullPool
+
+engine = create_engine(_normalized_database_url(), **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
@@ -29,7 +43,11 @@ def init_db() -> None:
         _migrate_app_settings_table()
         _migrate_threads_analytics_tables()
         _migrate_threads_demand_tables()
+        _migrate_demand_opportunity_tables()
+        _migrate_daily_link_catalog_tables()
         _allow_duplicate_post_link_affiliate_urls()
+    elif _normalized_database_url().startswith("postgresql"):
+        _migrate_threads_posts_columns_postgres()
 
 
 def _migrate_threads_posts_columns() -> None:
@@ -51,6 +69,11 @@ def _migrate_threads_posts_columns() -> None:
         "performance_score": "FLOAT",
         "posted_account_name": "VARCHAR(128)",
         "posted_account_user_id": "VARCHAR(255)",
+        "telegram_cta_text": "TEXT",
+        "telegram_cta_mode": "VARCHAR(32)",
+        "telegram_cta_reply_id": "VARCHAR(255)",
+        "telegram_cta_posted_at": "DATETIME",
+        "telegram_cta_status": "VARCHAR(32)",
     }
     with engine.begin() as connection:
         existing = {
@@ -60,6 +83,38 @@ def _migrate_threads_posts_columns() -> None:
         for column, column_type in columns.items():
             if column not in existing:
                 connection.exec_driver_sql(f"ALTER TABLE threads_posts ADD COLUMN {column} {column_type}")
+
+
+def _migrate_threads_posts_columns_postgres() -> None:
+    columns = {
+        "need": "TEXT",
+        "persona": "VARCHAR(255)",
+        "angle": "TEXT",
+        "persona_id": "VARCHAR(128)",
+        "angle_id": "VARCHAR(128)",
+        "hook": "TEXT",
+        "hook_type": "VARCHAR(255)",
+        "story_type": "VARCHAR(255)",
+        "content_type": "VARCHAR(128)",
+        "content_goal": "VARCHAR(64)",
+        "diversity_key": "VARCHAR(255)",
+        "target_platform": "VARCHAR(64)",
+        "click_count": "INTEGER DEFAULT 0",
+        "impression_estimate": "INTEGER",
+        "performance_score": "FLOAT",
+        "posted_account_name": "VARCHAR(128)",
+        "posted_account_user_id": "VARCHAR(255)",
+        "telegram_cta_text": "TEXT",
+        "telegram_cta_mode": "VARCHAR(32)",
+        "telegram_cta_reply_id": "VARCHAR(255)",
+        "telegram_cta_posted_at": "TIMESTAMP WITH TIME ZONE",
+        "telegram_cta_status": "VARCHAR(32)",
+    }
+    with engine.begin() as connection:
+        for column, column_type in columns.items():
+            connection.exec_driver_sql(
+                f"ALTER TABLE threads_posts ADD COLUMN IF NOT EXISTS {column} {column_type}"
+            )
 
 
 def _migrate_topic_memory_table() -> None:
@@ -245,6 +300,155 @@ def _migrate_threads_demand_tables() -> None:
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_threads_demand_actions_action ON threads_demand_actions (action)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_threads_demand_actions_account_name ON threads_demand_actions (account_name)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_threads_demand_actions_created_at ON threads_demand_actions (created_at)")
+
+
+def _migrate_demand_opportunity_tables() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS demand_opportunities (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                platform VARCHAR(64) NOT NULL DEFAULT 'threads',
+                content_type VARCHAR(64) NOT NULL DEFAULT 'post',
+                external_content_id VARCHAR(255),
+                source_url TEXT,
+                author_username VARCHAR(255),
+                source_text_excerpt TEXT NOT NULL DEFAULT '',
+                content_hash VARCHAR(64) NOT NULL,
+                matched_query VARCHAR(255),
+                intent VARCHAR(64) NOT NULL DEFAULT '',
+                purchase_intent_score FLOAT NOT NULL DEFAULT 0,
+                category VARCHAR(255) NOT NULL DEFAULT '',
+                normalized_query TEXT NOT NULL DEFAULT '',
+                constraints_json TEXT NOT NULL DEFAULT '{}',
+                matched_products_json TEXT NOT NULL DEFAULT '[]',
+                suggested_response TEXT NOT NULL DEFAULT '',
+                response_mode VARCHAR(32) NOT NULL DEFAULT 'manual_copy',
+                status VARCHAR(32) NOT NULL DEFAULT 'new',
+                intake_source VARCHAR(64) NOT NULL DEFAULT 'telegram_manual',
+                scan_account_name VARCHAR(128),
+                reply_account_name VARCHAR(128),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                expires_at DATETIME,
+                approved_at DATETIME,
+                replied_at DATETIME,
+                external_reply_id VARCHAR(255),
+                error_message TEXT
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_opportunities_platform ON demand_opportunities (platform)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_opportunities_external_content_id ON demand_opportunities (external_content_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_opportunities_content_hash ON demand_opportunities (content_hash)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_opportunities_status ON demand_opportunities (status)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_opportunities_intake_source ON demand_opportunities (intake_source)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_opportunities_created_at ON demand_opportunities (created_at)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_opportunities_expires_at ON demand_opportunities (expires_at)")
+
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS demand_actions (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                opportunity_id INTEGER,
+                action VARCHAR(64) NOT NULL,
+                account_name VARCHAR(128),
+                result VARCHAR(64) NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_actions_opportunity_id ON demand_actions (opportunity_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_actions_action ON demand_actions (action)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_actions_account_name ON demand_actions (account_name)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_demand_actions_created_at ON demand_actions (created_at)")
+
+        legacy_exists = connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='threads_demand_opportunities'"
+        ).first()
+        if legacy_exists:
+            connection.exec_driver_sql(
+                """
+                INSERT INTO demand_opportunities (
+                    platform, content_type, external_content_id, source_url, author_username,
+                    source_text_excerpt, content_hash, matched_query, intent, purchase_intent_score,
+                    category, normalized_query, constraints_json, matched_products_json,
+                    suggested_response, response_mode, status, intake_source, scan_account_name,
+                    reply_account_name, created_at, expires_at, approved_at, replied_at,
+                    external_reply_id, error_message
+                )
+                SELECT
+                    'threads', 'post', external_post_id, permalink, author_username,
+                    source_text_excerpt, lower(hex(randomblob(16))), matched_keyword, intent,
+                    purchase_intent_score, category, normalized_query, constraints_json,
+                    matched_products_json, suggested_comment,
+                    CASE WHEN threads_reply_id IS NOT NULL AND threads_reply_id != '' THEN 'api_reply' ELSE 'manual_copy' END,
+                    status, 'api_scan', scan_account_name, reply_account_name, created_at,
+                    expires_at, approved_at, replied_at, threads_reply_id, error_message
+                FROM threads_demand_opportunities old
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM demand_opportunities d
+                    WHERE d.platform = 'threads' AND d.external_content_id = old.external_post_id
+                )
+                """
+            )
+
+
+def _migrate_daily_link_catalog_tables() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS affiliate_products (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                product_name TEXT NOT NULL DEFAULT '',
+                affiliate_url TEXT NOT NULL UNIQUE,
+                product_url TEXT,
+                price VARCHAR(64),
+                shop_name VARCHAR(255),
+                category_id VARCHAR(64) NOT NULL DEFAULT 'other',
+                subcategory VARCHAR(128),
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_affiliate_products_affiliate_url ON affiliate_products (affiliate_url)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_affiliate_products_category_id ON affiliate_products (category_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_affiliate_products_is_active ON affiliate_products (is_active)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS affiliate_import_batches (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                batch_name VARCHAR(255),
+                import_date VARCHAR(10) NOT NULL,
+                source VARCHAR(255) NOT NULL DEFAULT '',
+                total_rows INTEGER NOT NULL DEFAULT 0,
+                imported_count INTEGER NOT NULL DEFAULT 0,
+                duplicate_count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_affiliate_import_batches_import_date ON affiliate_import_batches (import_date)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS daily_link_entries (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                import_date VARCHAR(10) NOT NULL,
+                batch_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                CONSTRAINT uq_daily_link_product_date UNIQUE (product_id, import_date),
+                FOREIGN KEY(product_id) REFERENCES affiliate_products (id),
+                FOREIGN KEY(batch_id) REFERENCES affiliate_import_batches (id)
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_daily_link_entries_product_id ON daily_link_entries (product_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_daily_link_entries_import_date ON daily_link_entries (import_date)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_daily_link_entries_batch_id ON daily_link_entries (batch_id)")
 
 
 def _allow_duplicate_post_link_affiliate_urls() -> None:

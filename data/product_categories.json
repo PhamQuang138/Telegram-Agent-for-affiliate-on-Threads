@@ -1,0 +1,11 @@
+[
+  {"id": "fashion", "label": "Thoi trang", "keywords": ["ao", "quan", "vay", "dam", "giay", "dep", "tui", "hoodie", "khoac", "jean", "thun", "mac", "outfit"]},
+  {"id": "beauty", "label": "Lam dep", "keywords": ["son", "kem", "serum", "sua rua mat", "duong da", "toc", "makeup", "my pham"]},
+  {"id": "home", "label": "Gia dung", "keywords": ["bep", "nha", "quat", "ke", "hop", "noi", "chao", "den", "lau", "may hut", "do gia dung"]},
+  {"id": "electronics", "label": "Dien tu", "keywords": ["sac", "cap", "tai nghe", "loa", "ban phim", "chuot", "laptop", "dien thoai", "usb", "adapter"]},
+  {"id": "study_office", "label": "Hoc tap van phong", "keywords": ["ban lam viec", "van phong", "but", "vo", "giay", "may in", "muc in", "ghe", "gia do laptop"]},
+  {"id": "sports", "label": "The thao", "keywords": ["bong da", "the thao", "gym", "chay bo", "yoga", "ao da bong", "giay da bong"]},
+  {"id": "food", "label": "Do an", "keywords": ["banh", "keo", "ca phe", "tra", "sua", "do an", "thuc pham", "nuoc"]},
+  {"id": "decor", "label": "Decor", "keywords": ["decor", "trang tri", "tranh", "nen", "tham", "lo hoa", "den ngu"]},
+  {"id": "other", "label": "Khac", "keywords": []}
+]

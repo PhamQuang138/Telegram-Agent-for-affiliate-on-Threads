@@ -1,6 +1,6 @@
-import random
 import time
 import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agents.threads_shopee_agent import (
     check_model_availability,
@@ -18,7 +18,7 @@ from agents.threads_shopee_agent import (
 )
 from app.config import get_settings
 from app.db import SessionLocal, init_db
-from app.models import ThreadsDemandOpportunity, ThreadsPost, ThreadsPostMetric, ThreadsReply
+from app.models import AppSetting, DemandOpportunity, ThreadsPost, ThreadsPostMetric, ThreadsReply
 from app.schemas import ThreadsDraftRequest
 from app.services.shopee_csv_importer import import_shopee_csv, scan_shopee_csv
 from app.services.content_engine import generate_content_ideas
@@ -73,21 +73,44 @@ from app.services.threads_reply_service import sync_account_replies, sync_post_r
 from app.services.threads_sync_service import sync_account_posts, sync_all_accounts_posts
 from app.services.trend_service import collect_threads_keyword_snapshot, get_trending_keywords
 from app.services.topic_memory import is_topic_recently_used, record_topic_usage
-from app.services.threads_demand_scanner import (
+from app.services.feature_flags import feature_snapshot, is_feature_enabled
+from app.services.daily_link_catalog import (
+    add_daily_product,
+    build_category_message,
+    category_counts,
+    daily_stats as daily_catalog_stats,
+    display_date,
+    import_daily_csv,
+    parse_import_date,
+    products_for_category,
+    recent_dates,
+    recategorize_product,
+    set_daily_product_active,
+    short_display_date,
+)
+from app.services.daily_link_cleanup import cleanup_expired_daily_links
+from app.services.telegram_cta_generator import generate_telegram_cta
+from app.services.manual_demand_intake import create_manual_demand, import_demands_csv
+from app.services.demand_opportunity_service import (
     approve_batch as approve_buy_batch_service,
     approve_opportunity,
-    build_scan_keywords,
+    copy_opportunity,
     edit_opportunity_comment,
     get_opportunity as get_buy_opportunity,
     list_opportunities,
+    opstats as opportunity_stats,
     reply_batch as reply_buy_batch_service,
     reply_opportunity,
-    scan_threads_demand,
     skip_opportunity,
+)
+from app.services.threads_demand_scanner import (
+    build_scan_keywords,
+    scan_threads_demand,
 )
 
 PENDING_UPDATES: dict[int, tuple[str, int]] = {}
 PENDING_ENGAGEMENT_POSTS: dict[int, dict[str, str]] = {}
+DAILY_SEND_COOLDOWNS: dict[tuple[int, str, str, int], float] = {}
 STARTUP_IMPORT_DONE = False
 ENGAGEMENT_PERSONA_LABELS = {
     "daily": "Doi thuong",
@@ -107,6 +130,37 @@ ENGAGEMENT_MODE_STYLES = {
     "ask": "ask for advice, relatable dilemma, soft question",
     "quote": "quote-like thought, sharp one-liner, reflective",
     "observation": "social observation, everyday insight, mildly debatable",
+}
+
+FROZEN_COMMANDS = {
+    "scanthreads",
+    "buyops",
+    "buyop",
+    "approvebuy",
+    "approvebuybatch",
+    "editbuy",
+    "skipbuy",
+    "replybuy",
+    "replybuybatch",
+    "adddemand",
+    "adddemandtext",
+    "importdemands",
+    "copybuy",
+    "approveandcopy",
+    "syncposts",
+    "syncinsights",
+    "syncreplies",
+    "threadstats",
+    "accountperformance",
+    "threadtrends",
+    "mentions",
+    "replysuggestions",
+    "ideas",
+    "ideadrafts",
+    "trenddrafts",
+    "trends",
+    "performance",
+    "opstats",
 }
 
 
@@ -144,6 +198,44 @@ def _hashtags(post: ThreadsPost) -> str:
 
 def _metadata_cta(**items: str) -> str:
     return "__meta__" + json.dumps(items, ensure_ascii=False)
+
+
+def _pending_engagement_key(user_id: int) -> str:
+    return f"pending_engagement:{user_id}"
+
+
+def _save_pending_engagement(user_id: int, payload: dict[str, str]) -> None:
+    with _db() as db:
+        key = _pending_engagement_key(user_id)
+        setting = db.get(AppSetting, key)
+        value = json.dumps(payload, ensure_ascii=False)
+        now = datetime.now().isoformat()
+        if setting:
+            setting.value = value
+            setting.updated_at = now
+        else:
+            db.add(AppSetting(key=key, value=value, updated_at=now))
+        db.commit()
+
+
+def _load_pending_engagement(user_id: int) -> dict[str, str] | None:
+    with _db() as db:
+        setting = db.get(AppSetting, _pending_engagement_key(user_id))
+        if not setting:
+            return None
+        try:
+            value = json.loads(setting.value)
+        except json.JSONDecodeError:
+            return None
+        return {str(key): str(val) for key, val in value.items()}
+
+
+def _clear_pending_engagement(user_id: int) -> None:
+    with _db() as db:
+        setting = db.get(AppSetting, _pending_engagement_key(user_id))
+        if setting:
+            db.delete(setting)
+            db.commit()
 
 
 def _post_meta(post: ThreadsPost) -> dict[str, str]:
@@ -495,7 +587,25 @@ def run_startup_import_once() -> None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        """/threads_shopee <keyword hoặc Shopee affiliate link>
+        """AI Opportunity Engine MVP:
+/adddemand <url> <nội dung bài>
+/adddemandtext <nội dung bài>
+/importdemands <csv_path>
+/buyops [limit]
+/buyop <id>
+/approvebuy <id>
+/approvebuybatch <id1,id2,id3>
+/editbuy <id> <comment mới>
+/skipbuy <id>
+/copybuy <id>
+/approveandcopy <id>
+/replybuy <id> [account_name]
+/replybuybatch <id1,id2,id3> [account_name]
+/opstats
+/features
+
+Workflow cũ vẫn dùng được:
+/threads_shopee <keyword hoặc Shopee affiliate link>
 /updatelink <csv_path> [group_size] - quét CSV, chưa import
 /confirmupdate - nhập các link vừa quét vào queue
 /cancelupdate - hủy lần quét CSV hiện tại
@@ -520,14 +630,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 /mentions [account_name]
 /replysuggestions <post_id>
 /scanthreads [keyword] [account_name]
-/buyops [limit]
-/buyop <id>
-/approvebuy <id>
-/approvebuybatch <id1,id2,id3>
-/editbuy <id> <comment mới>
-/skipbuy <id>
-/replybuy <id> [account_name]
-/replybuybatch <id1,id2,id3> [account_name]
 /engagepost <topic>
 /view <post_id>
 /regenerate <post_id>
@@ -725,7 +827,7 @@ async def engagepost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Dung: /engagepost <topic>\nVi du: /engagepost ban lam viec bua")
         return
 
-    PENDING_ENGAGEMENT_POSTS[user_id] = {"topic": topic, "persona": "daily"}
+    _save_pending_engagement(user_id, {"topic": topic, "persona": "daily"})
     await update.message.reply_text(
         "Chon persona cho bai cau view nay:",
         reply_markup=InlineKeyboardMarkup(
@@ -752,7 +854,7 @@ async def choose_engagement_persona(update: Update, context: ContextTypes.DEFAUL
     if user_id is None:
         return
 
-    pending = PENDING_ENGAGEMENT_POSTS.get(user_id)
+    pending = _load_pending_engagement(user_id)
     if not pending:
         await query.message.reply_text("Khong con bai cau view nao dang cho chon persona. Hay gui lai /engagepost <topic>.")
         return
@@ -761,6 +863,7 @@ async def choose_engagement_persona(update: Update, context: ContextTypes.DEFAUL
     if persona not in ENGAGEMENT_PERSONA_LABELS:
         persona = "daily"
     pending["persona"] = persona
+    _save_pending_engagement(user_id, pending)
 
     persona_name = _engagement_persona_name(persona)
     await query.edit_message_text(
@@ -793,7 +896,7 @@ async def choose_engagement_mode(update: Update, context: ContextTypes.DEFAULT_T
     if user_id is None:
         return
 
-    pending = PENDING_ENGAGEMENT_POSTS.get(user_id)
+    pending = _load_pending_engagement(user_id)
     if not pending:
         await query.message.reply_text("Khong con bai cau view nao dang cho chon dang bai. Hay gui lai /engagepost <topic>.")
         return
@@ -805,17 +908,34 @@ async def choose_engagement_mode(update: Update, context: ContextTypes.DEFAULT_T
 
     persona_name = _engagement_persona_name(pending.get("persona", "daily"))
     mode_name = _engagement_mode_name(mode)
-    await query.edit_message_text(
-        f"Persona: {persona_name}\nDang bai: {mode_name}\nBai nay co gan 2-3 link random o comment khong?",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Co gan link", callback_data="engage_links:yes"),
-                    InlineKeyboardButton("Khong gan link", callback_data="engage_links:no"),
-                ]
-            ]
-        ),
-    )
+    await query.edit_message_text(f"Dang tao bai {mode_name.lower()} persona {persona_name.lower()}...")
+    _clear_pending_engagement(user_id)
+
+    with _db() as db:
+        draft = generate_threads_engagement_draft(
+            db,
+            pending.get("topic", ""),
+            style=_engagement_mode_style(mode),
+            persona=pending.get("persona", "daily"),
+        )
+        draft.cta = _metadata_cta(persona=pending.get("persona", "daily"), mode=mode, style=_engagement_mode_style(mode))
+        post = create_post(
+            db,
+            keyword=pending.get("topic", ""),
+            product_name="engagement-only",
+            affiliate_url=None,
+            draft=draft,
+            status="engagement",
+            metadata={
+                "content_type": "engagement",
+                "content_goal": "engagement",
+                "persona": persona_name,
+                "hook_type": mode,
+            },
+        )
+        await query.message.reply_text(_preview(post))
+        await query.message.reply_text("Bai Threads nay se khong kem link Shopee. Khi /post, bot se reply CTA dan ve Telegram group neu da cau hinh.")
+        await query.message.reply_text(_queue_status_text(db))
 
 
 async def choose_engagement_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1083,6 +1203,9 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def learn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("learning_engine"):
+        await update.message.reply_text("Learning engine đang đóng băng trong MVP.")
+        return
     result = update_learned_weights(min_posts=10, lookback_days=30)
     top_persona = result.get("top_personas", [{}])[0].get("name", "chua co") if result.get("top_personas") else "chua co"
     weak_persona = result.get("weak_personas", [{}])[0].get("name", "chua co") if result.get("weak_personas") else "chua co"
@@ -1104,6 +1227,9 @@ async def learn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def autolearn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("learning_engine"):
+        await update.message.reply_text("Auto learning đang đóng băng trong MVP.")
+        return
     if not context.args or context.args[0].lower() not in {"on", "off"}:
         await update.message.reply_text("Dung: /autolearn on hoặc /autolearn off")
         return
@@ -1528,6 +1654,9 @@ async def post_to_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         post.status = "posted"
         db.commit()
         db.refresh(post)
+        if _should_post_telegram_cta(post):
+            ok, cta_message = await _publish_telegram_cta_reply(db, post, account)
+            reply_message += f"\nTelegram CTA: {cta_message if ok else 'failed - ' + cta_message}"
         learning_result = maybe_run_auto_learning()
         learning_message = ""
         if learning_result:
@@ -1617,6 +1746,9 @@ Top 5 bài nhiều click nhất:
 
 
 async def syncposts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("threads_background_sync"):
+        await update.message.reply_text("Threads sync đang đóng băng trong MVP. Dùng workflow manual demand intake.")
+        return
     account_name = context.args[0].strip() if context.args else ""
     await update.message.reply_text("Đang đồng bộ bài Threads...")
     try:
@@ -1628,6 +1760,9 @@ async def syncposts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def syncinsights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("threads_background_sync"):
+        await update.message.reply_text("Threads insights sync đang đóng băng trong MVP.")
+        return
     account_name = context.args[0].strip() if context.args else ""
     await update.message.reply_text("Đang đồng bộ insights Threads...")
     try:
@@ -1639,6 +1774,9 @@ async def syncinsights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def syncreplies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("threads_background_sync"):
+        await update.message.reply_text("Threads replies sync đang đóng băng trong MVP.")
+        return
     account_name = context.args[0].strip() if context.args else ""
     await update.message.reply_text("Đang đồng bộ replies Threads...")
     results = []
@@ -1687,6 +1825,9 @@ async def threadstats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def accountperformance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("learning_engine"):
+        await update.message.reply_text("Account learning đang đóng băng trong MVP.")
+        return
     account_name = context.args[0].strip() if context.args else ""
     if not account_name:
         await update.message.reply_text("Dùng: /accountperformance <account_name>")
@@ -1710,6 +1851,9 @@ async def accountperformance(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def threadtrends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("threads_trend_provider"):
+        await update.message.reply_text("Threads trend provider đang đóng băng. Dùng /adddemand để nhập opportunity thủ công.")
+        return
     keyword = " ".join(context.args).strip()
     if not keyword:
         await update.message.reply_text("Dùng: /threadtrends <keyword>")
@@ -1832,7 +1976,65 @@ async def delete_thread(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Đã gửi lệnh xóa Threads." if ok else "Chưa xóa được, có thể token thiếu quyền threads_delete.")
 
 
+async def features(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    snapshot = feature_snapshot()
+    await update.message.reply_text(
+        "Feature flags:\n"
+        "Enabled:\n"
+        + "\n".join(f"- {item}" for item in snapshot["enabled"])
+        + "\n\nFrozen:\n"
+        + "\n".join(f"- {item}" for item in snapshot["frozen"])
+    )
+
+
+async def adddemand(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("manual_demand_intake"):
+        await update.message.reply_text("Manual demand intake đang tắt.")
+        return
+    if not context.args:
+        await update.message.reply_text("Dùng: /adddemand <url> <nội dung bài>")
+        return
+    url = context.args[0].strip()
+    text = " ".join(context.args[1:]).strip()
+    if not text:
+        await update.message.reply_text("Bot không scrape URL. Hãy gửi thêm nội dung bài sau URL.")
+        return
+    result = create_manual_demand(text=text, url=url)
+    await update.message.reply_text(_manual_demand_result_text(result))
+
+
+async def adddemandtext(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("manual_demand_intake"):
+        await update.message.reply_text("Manual demand intake đang tắt.")
+        return
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("Dùng: /adddemandtext <nội dung bài>")
+        return
+    result = create_manual_demand(text=text)
+    await update.message.reply_text(_manual_demand_result_text(result))
+
+
+async def importdemands(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dùng: /importdemands <csv_path>")
+        return
+    result = import_demands_csv(" ".join(context.args).strip())
+    await update.message.reply_text(
+        "Import demands xong.\n"
+        f"- rows: {result['rows']}\n"
+        f"- created: {result['created']}\n"
+        f"- duplicates: {result['duplicates']}\n"
+        f"- low_intent: {result['low_intent']}\n"
+        f"- no_product_match: {result['no_product_match']}\n"
+        f"- errors: {'; '.join(result['errors'][:3]) if result['errors'] else 'không có'}"
+    )
+
+
 async def scanthreads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_feature_enabled("threads_auto_scanner"):
+        await update.message.reply_text("Threads auto scanner đang đóng băng. Dùng /adddemand <url> <text> hoặc /adddemandtext <text>.")
+        return
     if not get_settings().threads_demand_scanner_enabled:
         await update.message.reply_text("Demand scanner đang tắt. Bật THREADS_DEMAND_SCANNER_ENABLED=true trong .env trước.")
         return
@@ -1938,8 +2140,11 @@ async def replybuy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     account_name = context.args[1].strip() if len(context.args) >= 2 else None
     await update.message.reply_text("Đang reply opportunity đã approve...")
-    ok, message = reply_opportunity(int(context.args[0]), account_name)
-    await update.message.reply_text(f"{'Đã reply' if ok else 'Chưa reply được'}: {message}")
+    ok, message, comment = reply_opportunity(int(context.args[0]), account_name)
+    if comment:
+        await update.message.reply_text(f"{'Đã reply' if ok else 'Chưa reply được'}: {message}\n\nManual copy:\n{comment}")
+    else:
+        await update.message.reply_text(f"{'Đã reply' if ok else 'Chưa reply được'}: {message}")
 
 
 async def replybuybatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1958,6 +2163,58 @@ async def replybuybatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"- #{row['id']}: {'ok' if row['ok'] else 'fail'} - {row['message']}"
             for row in result["results"]
         )
+    )
+
+
+async def copybuy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dùng: /copybuy <id>")
+        return
+    ok, message, comment = copy_opportunity(int(context.args[0]), approve=False)
+    await update.message.reply_text(f"{message}\n\n{comment}" if ok else f"Chưa copy được: {message}")
+
+
+async def approveandcopy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Dùng: /approveandcopy <id>")
+        return
+    ok, message, comment = copy_opportunity(int(context.args[0]), approve=True)
+    await update.message.reply_text(f"{message}\n\n{comment}" if ok else f"Chưa copy được: {message}")
+
+
+async def opstats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    stats = opportunity_stats()
+    await update.message.reply_text(
+        "Opportunity stats:\n"
+        f"- total: {stats['total']}\n"
+        f"- approved: {stats['statuses'].get('approved', 0)}\n"
+        f"- replied: {stats['statuses'].get('replied', 0)}\n"
+        f"- manual copied: {stats['statuses'].get('manual_copied', 0)}\n"
+        f"- skipped: {stats['statuses'].get('skipped', 0)}\n"
+        f"- expired: {stats['statuses'].get('expired', 0)}\n"
+        f"- clicks: {stats['clicks']}\n"
+        "Top intents:\n"
+        + ("\n".join(f"- {row['name']}: {row['count']}" for row in stats["top_intents"]) or "- chưa có")
+        + "\nTop categories:\n"
+        + ("\n".join(f"- {row['name']}: {row['count']}" for row in stats["top_categories"]) or "- chưa có")
+    )
+
+
+def _manual_demand_result_text(result: dict) -> str:
+    if result["created"]:
+        return (
+            f"Đã tạo opportunity #{result['opportunity_id']}.\n"
+            f"- intent: {result['intent']} ({result['purchase_intent_score']:.0f})\n"
+            f"- nhu cầu: {result['normalized_query']}\n"
+            f"- products: {result['matched_products_count']}\n"
+            f"- mode: {result['response_mode']}\n"
+            f"Dùng /buyop {result['opportunity_id']} để xem, /approvebuy {result['opportunity_id']} để duyệt."
+        )
+    return (
+        "Chưa tạo opportunity.\n"
+        f"- reason: {result['reason']}\n"
+        f"- intent: {result.get('intent')}\n"
+        f"- score: {result.get('purchase_intent_score')}"
     )
 
 
@@ -2004,7 +2261,7 @@ def _weights_line(weights: dict) -> str:
     return ", ".join(f"{key}: {value}" for key, value in list(sorted(weights.items(), key=lambda item: item[1], reverse=True))[:5])
 
 
-def _buyop_text(opp: ThreadsDemandOpportunity, full: bool = False) -> str:
+def _buyop_text(opp: DemandOpportunity, full: bool = False) -> str:
     try:
         products = json.loads(opp.matched_products_json or "[]")
     except json.JSONDecodeError:
@@ -2018,8 +2275,9 @@ def _buyop_text(opp: ThreadsDemandOpportunity, full: bool = False) -> str:
         f"- user: @{opp.author_username or 'unknown'}",
         f"- intent: {opp.intent} | score: {opp.purchase_intent_score:.0f}",
         f"- nhu cầu: {opp.normalized_query[:180]}",
-        f"- keyword: {opp.matched_keyword}",
-        f"- permalink: {opp.permalink or 'chưa có'}",
+        f"- source: {opp.platform} / {opp.intake_source}",
+        f"- url: {opp.source_url or 'text-only'}",
+        f"- response_mode: {opp.response_mode}",
         "- products:",
         product_lines,
     ]
@@ -2028,16 +2286,17 @@ def _buyop_text(opp: ThreadsDemandOpportunity, full: bool = False) -> str:
             [
                 f"- gốc: {opp.source_text_excerpt[:500]}",
                 "Comment đề xuất:",
-                opp.suggested_comment,
+                opp.suggested_response,
                 "Lệnh:",
                 f"- /approvebuy {opp.id}",
                 f"- /replybuy {opp.id}",
+                f"- /copybuy {opp.id}",
                 f"- /skipbuy {opp.id}",
                 f"- /editbuy {opp.id} <comment mới>",
             ]
         )
     else:
-        base.extend(["Comment:", opp.suggested_comment[:500]])
+        base.extend(["Comment:", opp.suggested_response[:500]])
     return "\n".join(base)
 
 
@@ -2050,64 +2309,475 @@ def _parse_ids(raw: str) -> list[int]:
     return ids
 
 
+def _telegram_group_target() -> int | str | None:
+    settings = get_settings()
+    raw = settings.telegram_community_group_id.strip()
+    if not raw:
+        raw = settings.telegram_group_invite_url.strip()
+    if raw.startswith("https://t.me/"):
+        slug = raw.rstrip("/").rsplit("/", 1)[-1]
+        if slug and not slug.startswith("+"):
+            return f"@{slug.lstrip('@')}"
+        return raw
+    if raw.startswith("@"):
+        return raw
+    if raw.lstrip("-").isdigit():
+        return int(raw)
+    return raw or None
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        """POD Bot - Telegram link catalog + Threads engagement
+
+Kho link:
+/links
+/linkdates
+/dealhomnay
+
+Admin import:
+/importdaily <csv_path> [date]
+/adddailylink <url> | <name> | <price>
+/adddailytext
+/dailystats [date]
+/cleanuppreview
+/cleanupdaily
+
+Threads:
+/engagepost <topic>
+/queue
+/view <post_id>
+/regenerate <post_id>
+/approve <post_id>
+/post <post_id> [account_name]
+/retrytelegramcta <post_id>
+
+System:
+/accounts
+/chatid
+/features"""
+    )
+
+
+async def frozen_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Chuc nang nay hien dang duoc dong bang. Bot dang tap trung vao kho link Telegram va bai Threads dan ve group."
+    )
+
+
+async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    await update.message.reply_text(f"chat_id: {chat.id if chat else 'unknown'}")
+
+
+async def importdaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dung: /importdaily <csv_path> [YYYY-MM-DD]")
+        return
+    csv_path = context.args[0]
+    raw_date = context.args[1] if len(context.args) >= 2 else None
+    await update.message.reply_text("Dang import link vao kho theo ngay...")
+    try:
+        with _db() as db:
+            result = import_daily_csv(db, csv_path, raw_date)
+    except Exception as exc:
+        await update.message.reply_text(f"Import daily loi: {exc}")
+        return
+    cleaned = (result.cleanup or {}).get("entries_deleted", 0)
+    await update.message.reply_text(
+        f"Ngay nhap: {display_date(result.import_date)}\n"
+        f"Tong dong: {result.total_rows}\n"
+        f"San pham moi: {result.new_products}\n"
+        f"Entry moi: {result.new_entries}\n"
+        f"Duplicate trong ngay: {result.duplicate_count}\n"
+        f"Link cu da don: {cleaned}"
+    )
+
+
+async def importdaily_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.document:
+        return
+    document = message.document
+    file_name = document.file_name or "daily-links.csv"
+    if not file_name.lower().endswith(".csv"):
+        return
+    await message.reply_text("Da nhan CSV. Dang tai file va import vao kho link...")
+    temp_path = ""
+    try:
+        tg_file = await document.get_file()
+        suffix = "-" + file_name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            temp_path = tmp.name
+        await tg_file.download_to_drive(custom_path=temp_path)
+        with _db() as db:
+            result = import_daily_csv(db, temp_path)
+        cleaned = (result.cleanup or {}).get("entries_deleted", 0)
+        await message.reply_text(
+            f"Import CSV upload xong.\n"
+            f"Ngay nhap: {display_date(result.import_date)}\n"
+            f"Tong dong: {result.total_rows}\n"
+            f"San pham moi: {result.new_products}\n"
+            f"Entry moi: {result.new_entries}\n"
+            f"Duplicate trong ngay: {result.duplicate_count}\n"
+            f"Link cu da don: {cleaned}"
+        )
+    except Exception as exc:
+        await message.reply_text(f"Import CSV upload loi: {exc}")
+    finally:
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+async def adddailylink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text("Dung: /adddailylink <url> | <name> | <price>")
+        return
+    try:
+        with _db() as db:
+            result = add_daily_product(db, text)
+        if get_settings().enable_daily_link_auto_cleanup:
+            cleanup_expired_daily_links(get_settings().daily_link_retention_days)
+    except Exception as exc:
+        await update.message.reply_text(f"Chua them duoc link: {exc}")
+        return
+    await update.message.reply_text(
+        f"Da them link cho ngay {display_date(result.import_date)}. Entry moi: {result.new_entries}, duplicate: {result.duplicate_count}"
+    )
+
+
+async def adddailytext(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await adddailylink(update, context)
+
+
+async def dailystats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw_date = context.args[0] if context.args else None
+    try:
+        with _db() as db:
+            stats = daily_catalog_stats(db, raw_date)
+    except Exception as exc:
+        await update.message.reply_text(f"Khong doc duoc stats: {exc}")
+        return
+    lines = [
+        f"Daily catalog {display_date(stats['import_date'])}",
+        f"total_entries: {stats['total_entries']}",
+        f"active_entries: {stats['active_entries']}",
+    ]
+    for item in stats["categories"]:
+        lines.append(f"- {item['label']}: {item['count']}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cleanuppreview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = cleanup_expired_daily_links(get_settings().daily_link_retention_days, preview=True)
+    await update.message.reply_text(_cleanup_result_text(result, "Preview cleanup daily"))
+
+
+async def cleanupdaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = cleanup_expired_daily_links(get_settings().daily_link_retention_days)
+    await update.message.reply_text(_cleanup_result_text(result, "Cleanup daily xong"))
+
+
+def _cleanup_result_text(result: dict, title: str) -> str:
+    return (
+        f"{title}\n"
+        f"cutoff_date: {result.get('cutoff_date')}\n"
+        f"entries_deleted: {result.get('entries_deleted')}\n"
+        f"batches_deleted: {result.get('batches_deleted')}\n"
+        f"orphan_products_deleted: {result.get('orphan_products_deleted')}\n"
+        f"errors: {', '.join(result.get('errors') or []) or 'khong co'}"
+    )
+
+
+async def links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _db() as db:
+        dates = recent_dates(db, limit=get_settings().daily_link_retention_days)
+    if not dates:
+        await update.message.reply_text("Hien chua co link uu dai nao trong 4 ngay gan nhat.")
+        return
+    buttons = [
+        [InlineKeyboardButton(short_display_date(item), callback_data=f"daily_date:{item}") for item in dates[index : index + 2]]
+        for index in range(0, len(dates), 2)
+    ]
+    await update.message.reply_text("Chon ngay cap nhat link:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def daily_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    import_date = (query.data or "").split(":", 1)[1]
+    try:
+        parse_import_date(import_date)
+    except ValueError:
+        await query.message.reply_text("Ngay khong hop le.")
+        return
+    with _db() as db:
+        cats = category_counts(db, import_date)
+    if not cats:
+        await query.edit_message_text(f"Ngay {display_date(import_date)} chua co link active.")
+        return
+    buttons = [[InlineKeyboardButton(f"{item['label']} ({item['count']})", callback_data=f"daily_cat:{import_date}:{item['category_id']}")] for item in cats]
+    buttons.append([InlineKeyboardButton("<- Chon ngay khac", callback_data="daily_back")])
+    await query.edit_message_text(f"Danh muc ngay {short_display_date(import_date)}:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def daily_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query:
+        await query.answer()
+        with _db() as db:
+            dates = recent_dates(db, limit=get_settings().daily_link_retention_days)
+        if not dates:
+            await query.edit_message_text("Hien chua co link uu dai nao trong 4 ngay gan nhat.")
+            return
+        buttons = [
+            [InlineKeyboardButton(short_display_date(item), callback_data=f"daily_date:{item}") for item in dates[index : index + 2]]
+            for index in range(0, len(dates), 2)
+        ]
+        await query.edit_message_text("Chon ngay cap nhat link:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def daily_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    parts = (query.data or "").split(":", 2)
+    if len(parts) != 3:
+        return
+    import_date, category_id = parts[1], parts[2]
+    try:
+        parse_import_date(import_date)
+    except ValueError:
+        await query.message.reply_text("Ngay khong hop le.")
+        return
+
+    settings = get_settings()
+    source_chat_id = query.message.chat_id if query.message else 0
+    configured_group = _telegram_group_target()
+    target_chat_id = source_chat_id if isinstance(configured_group, int) and source_chat_id == configured_group else configured_group
+    if not target_chat_id:
+        await query.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
+        return
+
+    key = (query.from_user.id if query.from_user else 0, import_date, category_id, target_chat_id)
+    now = time.time()
+    if now - DAILY_SEND_COOLDOWNS.get(key, 0) < settings.daily_group_send_cooldown_seconds:
+        await query.message.reply_text("Danh muc nay vua duoc gui vao group, ban xem tin nhan moi nhat nhe.")
+        return
+    DAILY_SEND_COOLDOWNS[key] = now
+
+    with _db() as db:
+        products = products_for_category(db, import_date, category_id)
+    if not products:
+        await query.message.reply_text("Danh muc nay chua co link active.")
+        return
+    for message in build_category_message(import_date, category_id, products):
+        await context.bot.send_message(
+            chat_id=target_chat_id,
+            text=message,
+            disable_web_page_preview=settings.telegram_daily_disable_link_preview,
+        )
+    await query.message.reply_text(f"Da gui {len(products)} link vao group.")
+
+
+async def recategorize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2:
+        await update.message.reply_text("Dung: /recategorize <link_id> <category_id>")
+        return
+    with _db() as db:
+        ok = recategorize_product(db, int(context.args[0]), context.args[1])
+    await update.message.reply_text("Da doi danh muc." if ok else "Khong tim thay link hoac category khong hop le.")
+
+
+async def deactivatedaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dung: /deactivatedaily <link_id>")
+        return
+    with _db() as db:
+        ok = set_daily_product_active(db, int(context.args[0]), False)
+    await update.message.reply_text("Da tat link." if ok else "Khong tim thay link.")
+
+
+async def activatedaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dung: /activatedaily <link_id>")
+        return
+    with _db() as db:
+        ok = set_daily_product_active(db, int(context.args[0]), True)
+    await update.message.reply_text("Da bat lai link." if ok else "Khong tim thay link.")
+
+
+async def senddaily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2:
+        await update.message.reply_text("Dung: /senddaily <date> <category_id>")
+        return
+    try:
+        import_date = parse_import_date(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Ngay phai la YYYY-MM-DD hoac DD/MM/YYYY.")
+        return
+    category_id = context.args[1]
+    settings = get_settings()
+    target_chat_id = _telegram_group_target()
+    if not target_chat_id:
+        await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
+        return
+    with _db() as db:
+        products = products_for_category(db, import_date, category_id)
+    if not products:
+        await update.message.reply_text("Khong co product active cho ngay/category nay.")
+        return
+    for message in build_category_message(import_date, category_id, products):
+        await context.bot.send_message(
+            chat_id=target_chat_id,
+            text=message,
+            disable_web_page_preview=settings.telegram_daily_disable_link_preview,
+        )
+    await update.message.reply_text(f"Da gui {len(products)} link vao group.")
+
+
+async def sendtoday(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await links(update, context)
+
+
+async def checktelegramcta(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = get_settings()
+    try:
+        preview = generate_telegram_cta({}, settings.threads_telegram_group_url or settings.telegram_group_invite_url, [])
+    except Exception as exc:
+        preview = f"CTA chua san sang: {exc}"
+    await update.message.reply_text(
+        f"Telegram CTA\nmode: {settings.threads_telegram_cta_mode}\n"
+        f"group_name: {settings.threads_telegram_group_name}\n"
+        f"url_configured: {'yes' if (settings.threads_telegram_group_url or settings.telegram_group_invite_url) else 'no'}\n"
+        f"preview:\n{preview}"
+    )
+
+
+def _recent_telegram_ctas(db: Session, limit: int = 5) -> list[str]:
+    return [
+        str(item)
+        for item in db.scalars(
+            select(ThreadsPost.telegram_cta_text)
+            .where(ThreadsPost.telegram_cta_text.is_not(None), ThreadsPost.telegram_cta_text != "")
+            .order_by(ThreadsPost.id.desc())
+            .limit(limit)
+        )
+    ]
+
+
+def _should_post_telegram_cta(post: ThreadsPost) -> bool:
+    settings = get_settings()
+    mode = settings.threads_telegram_cta_mode.lower().strip()
+    return (
+        settings.threads_include_telegram_cta
+        and mode in {"reply", "both", "main_post"}
+        and (post.content_goal == "engagement" or post.content_type == "engagement" or post.status == "engagement")
+    )
+
+
+async def _publish_telegram_cta_reply(db: Session, post: ThreadsPost, account: dict) -> tuple[bool, str]:
+    settings = get_settings()
+    mode = settings.threads_telegram_cta_mode.lower().strip()
+    if mode in {"none", "main_post"} or not _should_post_telegram_cta(post):
+        post.telegram_cta_status = "disabled"
+        post.telegram_cta_mode = mode
+        db.commit()
+        return True, "CTA disabled"
+    group_url = settings.threads_telegram_group_url or settings.telegram_group_invite_url
+    cta = generate_telegram_cta(_post_account_payload(post), group_url, _recent_telegram_ctas(db))
+    post.telegram_cta_text = cta
+    post.telegram_cta_mode = mode
+    if not post.threads_post_id:
+        post.telegram_cta_status = "failed"
+        db.commit()
+        return False, "missing Threads post id"
+    try:
+        result = publish_threads_reply(post.threads_post_id, cta, account=account)
+        post.telegram_cta_reply_id = str(result.get("id") or result.get("post_id") or "")
+        post.telegram_cta_posted_at = datetime.now()
+        post.telegram_cta_status = "posted"
+        db.commit()
+        return True, "CTA reply posted"
+    except Exception as exc:
+        post.telegram_cta_status = "failed"
+        db.commit()
+        return False, str(exc)
+
+
+async def retrytelegramcta(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Dung: /retrytelegramcta <post_id>")
+        return
+    with _db() as db:
+        post = get_post(db, int(context.args[0]))
+        if not post or not post.threads_post_id:
+            await update.message.reply_text("Post chua co Threads ID.")
+            return
+        try:
+            account = get_threads_account(post.posted_account_name) if post.posted_account_name else get_threads_account(None)
+        except ThreadsAccountError as exc:
+            await update.message.reply_text(f"Khong lay duoc account: {exc}")
+            return
+        ok, message = await _publish_telegram_cta_reply(db, post, account)
+    await update.message.reply_text(("Da retry CTA: " if ok else "Retry CTA loi: ") + message)
+
+
 def build_application() -> Application:
     settings = get_settings()
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not found")
 
     init_db()
-    run_startup_import_once()
+    if settings.enable_daily_link_auto_cleanup:
+        cleanup_expired_daily_links(settings.daily_link_retention_days)
+    if not settings.vercel:
+        run_startup_import_once()
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("importcsv", importcsv))
-    app.add_handler(CommandHandler("updatelink", updatelink))
-    app.add_handler(CommandHandler("confirmupdate", confirmupdate))
-    app.add_handler(CommandHandler("cancelupdate", cancelupdate))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("modelstatus", modelstatus))
-    app.add_handler(CommandHandler("checkmodels", checkmodels))
-    app.add_handler(CommandHandler("autodrafts", autodrafts))
-    app.add_handler(CommandHandler("contentdraft", contentdraft))
-    app.add_handler(CommandHandler("trends", trends))
-    app.add_handler(CommandHandler("trenddrafts", trenddrafts))
-    app.add_handler(CommandHandler("ideadrafts", ideadrafts))
-    app.add_handler(CommandHandler("performance", performance))
-    app.add_handler(CommandHandler("learn", learn))
-    app.add_handler(CommandHandler("autolearn", autolearn))
-    app.add_handler(CommandHandler("ideas", ideas))
+    app.add_handler(CommandHandler("links", links))
+    app.add_handler(CommandHandler("deal", links))
+    app.add_handler(CommandHandler("linkngay", links))
+    app.add_handler(CommandHandler("linkdates", links))
+    app.add_handler(CommandHandler("dealhomnay", links))
+    app.add_handler(CommandHandler("importdaily", importdaily))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("csv"), importdaily_document))
+    app.add_handler(CommandHandler("adddailylink", adddailylink))
+    app.add_handler(CommandHandler("adddailytext", adddailytext))
+    app.add_handler(CommandHandler("dailystats", dailystats))
+    app.add_handler(CommandHandler("recategorize", recategorize))
+    app.add_handler(CommandHandler("deactivatedaily", deactivatedaily))
+    app.add_handler(CommandHandler("activatedaily", activatedaily))
+    app.add_handler(CommandHandler("senddaily", senddaily))
+    app.add_handler(CommandHandler("sendtoday", sendtoday))
+    app.add_handler(CommandHandler("cleanuppreview", cleanuppreview))
+    app.add_handler(CommandHandler("cleanupdaily", cleanupdaily))
     app.add_handler(CommandHandler("accounts", accounts))
-    app.add_handler(CommandHandler("syncposts", syncposts))
-    app.add_handler(CommandHandler("syncinsights", syncinsights))
-    app.add_handler(CommandHandler("syncreplies", syncreplies))
-    app.add_handler(CommandHandler("threadstats", threadstats))
-    app.add_handler(CommandHandler("accountperformance", accountperformance))
-    app.add_handler(CommandHandler("threadtrends", threadtrends))
-    app.add_handler(CommandHandler("mentions", mentions))
-    app.add_handler(CommandHandler("replysuggestions", replysuggestions))
-    app.add_handler(CommandHandler("delete_thread", delete_thread))
-    app.add_handler(CommandHandler("scanthreads", scanthreads))
-    app.add_handler(CommandHandler("buyops", buyops))
-    app.add_handler(CommandHandler("buyop", buyop))
-    app.add_handler(CommandHandler("approvebuy", approvebuy))
-    app.add_handler(CommandHandler("approvebuybatch", approvebuybatch))
-    app.add_handler(CommandHandler("editbuy", editbuy))
-    app.add_handler(CommandHandler("skipbuy", skipbuy))
-    app.add_handler(CommandHandler("replybuy", replybuy))
-    app.add_handler(CommandHandler("replybuybatch", replybuybatch))
+    app.add_handler(CommandHandler("chatid", chatid))
+    app.add_handler(CommandHandler("features", features))
+    app.add_handler(CommandHandler("checktelegramcta", checktelegramcta))
     app.add_handler(CommandHandler("engagepost", engagepost))
     app.add_handler(CallbackQueryHandler(choose_engagement_persona, pattern=r"^engage_persona:(daily|controversial|advisor)$"))
     app.add_handler(CallbackQueryHandler(choose_engagement_mode, pattern=r"^engage_mode:(viral|advice|ask|quote|observation)$"))
-    app.add_handler(CallbackQueryHandler(choose_engagement_links, pattern=r"^engage_links:(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(daily_date_callback, pattern=r"^daily_date:\d{4}-\d{2}-\d{2}$"))
+    app.add_handler(CallbackQueryHandler(daily_category_callback, pattern=r"^daily_cat:\d{4}-\d{2}-\d{2}:[a-z_]+$"))
+    app.add_handler(CallbackQueryHandler(daily_back_callback, pattern=r"^daily_back$"))
     app.add_handler(CommandHandler("threads_shopee", threads_shopee))
-    app.add_handler(CommandHandler("addlink", addlink))
     app.add_handler(CommandHandler("queue", queue))
     app.add_handler(CommandHandler("view", view))
     app.add_handler(CommandHandler("regenerate", regenerate))
-    app.add_handler(CommandHandler("refreshdrafts", refreshdrafts))
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("post", post_to_threads))
-    app.add_handler(CommandHandler("replylinks", replylinks))
+    app.add_handler(CommandHandler("retrytelegramcta", retrytelegramcta))
     app.add_handler(CommandHandler("delete", delete))
-    app.add_handler(CommandHandler("analytics", analytics))
+    for command in FROZEN_COMMANDS:
+        app.add_handler(CommandHandler(command, frozen_command))
     return app
