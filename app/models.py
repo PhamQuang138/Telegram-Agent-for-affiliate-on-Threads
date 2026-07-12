@@ -184,6 +184,7 @@ class AdminAffiliateLink(Base):
     link_type_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     category_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     display_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    price: Mapped[str | None] = mapped_column(String(64), nullable=True)
     affiliate_url: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)

@@ -158,6 +158,7 @@ def ingest_admin_message(db: Session, admin_user_id: int, group_chat_id: int | s
             link_type_id=batch.link_type_id,
             category_id=batch.category_id,
             display_name=item["display_name"],
+            price=item.get("price") or None,
             affiliate_url=item["affiliate_url"],
             content_hash=content_hash,
             is_active=1,
@@ -190,14 +191,18 @@ def parse_link_lines(text: str, start_index: int = 1) -> list[dict | None]:
             continue
         url = match.group(0).strip()
         display_name = ""
+        price = ""
         if "|" in line:
-            display_name = line.split("|", 1)[0].strip()
+            parts = [part.strip() for part in line.split("|")]
+            display_name = parts[0] if parts else ""
+            if len(parts) >= 3:
+                price = parts[1]
         if not display_name:
             before_url = line[: match.start()].strip(" |-:")
             display_name = before_url
         if not display_name:
             display_name = f"Link ưu đãi {offer_index}"
-        rows.append({"display_name": display_name[:160], "affiliate_url": url})
+        rows.append({"display_name": display_name[:160], "price": price[:64], "affiliate_url": url})
         offer_index += 1
     return rows
 
@@ -241,6 +246,7 @@ def import_admin_links_csv(
                 continue
             if not product_name:
                 product_name = f"Link ưu đãi {total_rows}"
+            price = _first_field(row, PRICE_FIELDS)
 
             link_type = classify_affiliate_link_type(row, filename=path.name)
             category = classify_product_category(row, product_name=product_name, shop_name=_first_field(row, SHOP_NAME_FIELDS))
@@ -257,6 +263,7 @@ def import_admin_links_csv(
                     "link_type_id": link_type_id,
                     "category_id": category_id,
                     "display_name": product_name[:160],
+                    "price": price[:64] if price else "",
                     "affiliate_url": url,
                 }
             )
@@ -294,6 +301,7 @@ def import_admin_links_csv(
         existing = existing_by_key.get(key)
         if existing:
             existing.display_name = record["display_name"] or existing.display_name
+            existing.price = record["price"] or existing.price
             existing.expires_at = expires_at
             duplicates += 1
             continue
@@ -327,6 +335,7 @@ def import_admin_links_csv(
                     link_type_id=link_type_id,
                     category_id=category_id,
                     display_name=record["display_name"],
+                    price=record["price"] or None,
                     affiliate_url=url,
                     content_hash=hashlib.sha256(f"{batch.id}|{url}".encode("utf-8")).hexdigest(),
                     is_active=1,
@@ -368,6 +377,18 @@ AFFILIATE_URL_FIELDS = (
     "Tracking Link",
     "url",
 )
+PRICE_FIELDS = (
+    "Giá",
+    "Gia",
+    "Price",
+    "price",
+    "Giá sau giảm",
+    "Gia sau giam",
+    "Giá bán",
+    "Gia ban",
+    "Giá sản phẩm",
+    "Gia san pham",
+)
 SHOP_NAME_FIELDS = (
     "Tên cửa hàng",
     "Shop name",
@@ -387,6 +408,10 @@ def _first_field(row: dict, fields: tuple[str, ...]) -> str:
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def _link_display_name(link: AdminAffiliateLink) -> str:
+    return f"{link.display_name} - {link.price}" if link.price else link.display_name
 
 
 def close_batch(db: Session, admin_user_id: int, group_chat_id: int | str, status: str = "completed") -> AdminLinkBatch | None:
@@ -612,7 +637,7 @@ def build_private_link_messages(link_type_id: str, category_id: str, links: list
     ]
     lines = header[:]
     for index, link in enumerate(links[:25], start=1):
-        candidate = [f"{index}. {link.display_name}", link.affiliate_url, ""]
+        candidate = [f"{index}. {_link_display_name(link)}", link.affiliate_url, ""]
         if len("\n".join(lines + candidate + footer)) > 3500 and len(lines) > len(header):
             lines.extend(footer)
             yield_text = "\n".join(lines).strip()

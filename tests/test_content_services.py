@@ -25,6 +25,7 @@ from app.services.affiliate_link_type_classifier import classify_affiliate_link_
 from app.services import daily_link_cleanup
 from app.services.admin_curated_links import (
     active_type_counts as admin_active_type_counts,
+    build_private_link_messages,
     cleanup_expired_admin_links,
     close_batch as close_admin_link_batch,
     import_admin_links_csv,
@@ -689,8 +690,9 @@ def test_admin_curated_intake_requires_active_admin_batch(monkeypatch) -> None:
 
 
 def test_admin_curated_parse_lines_does_not_fetch_or_infer() -> None:
-    rows = parse_link_lines("Quạt mini | https://s.shopee.vn/a?x=1\nhttps://s.shopee.vn/b\nkhong co link")
+    rows = parse_link_lines("Quạt mini | 79k | https://s.shopee.vn/a?x=1\nhttps://s.shopee.vn/b\nkhong co link")
     assert rows[0]["display_name"] == "Quạt mini"
+    assert rows[0]["price"] == "79k"
     assert rows[0]["affiliate_url"] == "https://s.shopee.vn/a?x=1"
     assert rows[1]["display_name"] == "Link ưu đãi 2"
     assert rows[2] is None
@@ -892,6 +894,24 @@ def test_admin_csv_import_can_force_exclusive_type(tmp_path) -> None:
         assert result.type_counts["exclusive_offer"] == 1
         assert len(links) == 1
         assert normal_links == []
+
+
+def test_admin_csv_import_stores_price(tmp_path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    csv_path = tmp_path / "priced.csv"
+    csv_path.write_text(
+        "Tên sản phẩm,Link ưu đãi,Tên ưu đãi,Danh mục sản phẩm,Giá\n"
+        "Quạt mini,https://s.shopee.vn/price1,Hoa hồng Shopee,Gia dụng,79.000đ\n",
+        encoding="utf-8",
+    )
+    with Session() as db:
+        import_admin_links_csv(db, csv_path, admin_user_id=1, group_chat_id="-100")
+        links = get_admin_links_for_delivery(db, "shopee_commission", "home", limit=25, hard_cap=25)
+        messages = list(build_private_link_messages("shopee_commission", "home", links))
+        assert links[0].price == "79.000đ"
+        assert "Quạt mini - 79.000đ" in messages[0]
 
 
 def test_exclusive_delivery_can_ignore_category(tmp_path) -> None:

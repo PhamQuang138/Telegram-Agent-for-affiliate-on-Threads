@@ -33,6 +33,16 @@ engine = create_engine(_normalized_database_url(), **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
+def _ensure_column(connection, table_name: str, column_name: str, column_type: str) -> None:
+    columns = [row[1] for row in connection.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall()]
+    if column_name not in columns:
+        connection.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+
+def _ensure_column_postgres(connection, table_name: str, column_name: str, column_type: str) -> None:
+    connection.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}")
+
+
 def init_db() -> None:
     from app import models  # noqa: F401
 
@@ -523,6 +533,7 @@ def _migrate_admin_curated_link_tables() -> None:
                 link_type_id VARCHAR(64) NOT NULL,
                 category_id VARCHAR(64) NOT NULL,
                 display_name TEXT NOT NULL DEFAULT '',
+                price VARCHAR(64),
                 affiliate_url TEXT NOT NULL,
                 content_hash VARCHAR(64) NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
@@ -539,6 +550,7 @@ def _migrate_admin_curated_link_tables() -> None:
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_is_active ON admin_affiliate_links (is_active)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_created_at ON admin_affiliate_links (created_at)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_expires_at ON admin_affiliate_links (expires_at)")
+        _ensure_column(connection, "admin_affiliate_links", "price", "VARCHAR(64)")
         connection.exec_driver_sql(
             """
             CREATE TABLE IF NOT EXISTS private_link_requests (
@@ -591,6 +603,7 @@ def _migrate_admin_curated_link_tables_postgres() -> None:
                 link_type_id VARCHAR(64) NOT NULL,
                 category_id VARCHAR(64) NOT NULL,
                 display_name TEXT NOT NULL DEFAULT '',
+                price VARCHAR(64),
                 affiliate_url TEXT NOT NULL,
                 content_hash VARCHAR(64) NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
@@ -604,6 +617,7 @@ def _migrate_admin_curated_link_tables_postgres() -> None:
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_link_type_id ON admin_affiliate_links (link_type_id)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_category_id ON admin_affiliate_links (category_id)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_admin_affiliate_links_is_active ON admin_affiliate_links (is_active)")
+        _ensure_column_postgres(connection, "admin_affiliate_links", "price", "VARCHAR(64)")
         connection.exec_driver_sql(
             """
             CREATE TABLE IF NOT EXISTS private_link_requests (

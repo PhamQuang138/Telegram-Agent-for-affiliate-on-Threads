@@ -2689,7 +2689,8 @@ def _channel_link_post_text(link_type_id: str, category_id: str, links: list[Adm
     lines = header[:]
     truncated = False
     for index, link in enumerate(links[:15], start=1):
-        candidate = [f"{index}. {link.display_name}", link.affiliate_url, ""]
+        display_name = f"{link.display_name} - {link.price}" if link.price else link.display_name
+        candidate = [f"{index}. {display_name}", link.affiliate_url, ""]
         if len("\n".join(lines + candidate + footer)) > 3800:
             truncated = True
             break
@@ -2903,7 +2904,8 @@ async def choose_batch_category(update: Update, context: ContextTypes.DEFAULT_TY
         f"Loai: {link_type_name(batch.link_type_id)}\n"
         f"Danh muc: {category_label(batch.category_id)}\n\n"
         "Admin hay gui link, moi dong mot link hoac:\n"
-        "Ten san pham | https://..."
+        "Ten san pham | https://...\n"
+        "Ten san pham | Gia | https://..."
     )
 
 
@@ -3356,6 +3358,7 @@ async def viewlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Link #{link.id}\n"
         f"Ten: {link.display_name}\n"
+        f"Gia: {link.price or 'khong co'}\n"
         f"Loai: {link_type_name(link.link_type_id)}\n"
         f"Danh muc: {category_label(link.category_id)}\n"
         f"Active: {bool(link.is_active)}\n"
