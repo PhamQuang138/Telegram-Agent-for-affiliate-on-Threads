@@ -2476,18 +2476,38 @@ def _publish_category_buttons(link_type_id: str, categories: list[dict]) -> Inli
 def _channel_link_keyboard(link_type_id: str, category_id: str) -> InlineKeyboardMarkup:
     code = _link_type_code(link_type_id)
     bot_username = get_settings().telegram_bot_username.strip().lstrip("@")
-    rows = [[InlineKeyboardButton("Nhận link riêng", callback_data=f"ac:get:{code}:{category_id}")]]
+    rows = [[InlineKeyboardButton("Lấy riêng danh mục này", callback_data=f"ac:get:{code}:{category_id}")]]
+    if link_type_id != "exclusive_offer":
+        rows.append([InlineKeyboardButton("Lấy link độc quyền", callback_data=f"ac:get:{_link_type_code('exclusive_offer')}:{category_id}")])
     if bot_username:
         rows.append([InlineKeyboardButton("Mở bot", url=f"https://t.me/{bot_username}")])
     return InlineKeyboardMarkup(rows)
 
 
-def _channel_link_post_text(link_type_id: str, category_id: str, count: int) -> str:
-    return (
-        f"{link_type_name(link_type_id)} - {category_label(category_id)}\n\n"
-        f"Mình đã gom {min(count, 15)} link phù hợp trong danh mục này.\n"
-        "Bấm nút bên dưới, bot sẽ gửi riêng để không trôi trong channel."
-    )
+def _channel_link_post_text(link_type_id: str, category_id: str, links: list[AdminAffiliateLink]) -> str:
+    header = [
+        f"{link_type_name(link_type_id)} - {category_label(category_id)}",
+        "",
+        f"Gom nhanh {len(links[:15])} link đang có trong kho:",
+        "",
+    ]
+    footer = [
+        "Bấm nút bên dưới nếu muốn bot gửi riêng theo danh mục này.",
+        get_settings().telegram_daily_link_disclosure,
+    ]
+    lines = header[:]
+    truncated = False
+    for index, link in enumerate(links[:15], start=1):
+        candidate = [f"{index}. {link.display_name}", link.affiliate_url, ""]
+        if len("\n".join(lines + candidate + footer)) > 3800:
+            truncated = True
+            break
+        lines.extend(candidate)
+    if truncated:
+        lines.append("Còn thêm link trong kho, bấm nút nhận riêng để lấy đủ danh sách.")
+        lines.append("")
+    lines.extend(footer)
+    return "\n".join(lines).strip()
 
 
 def _csv_import_summary(result) -> str:
@@ -2868,7 +2888,7 @@ async def publish_category_callback(update: Update, context: ContextTypes.DEFAUL
         return
     sent = await context.bot.send_message(
         chat_id=target_group,
-        text=_channel_link_post_text(link_type_id, category_id, len(links)),
+        text=_channel_link_post_text(link_type_id, category_id, links),
         reply_markup=_channel_link_keyboard(link_type_id, category_id),
         disable_web_page_preview=True,
     )

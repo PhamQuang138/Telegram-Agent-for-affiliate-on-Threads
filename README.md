@@ -365,7 +365,7 @@ Affiliate Link
 Category
 ```
 
-After `/publishlinks`, the bot posts one channel message for the selected category with a button. The channel message does not expose affiliate URLs.
+After `/publishlinks`, the bot posts one channel message for the selected category with the public affiliate links. The same message also includes buttons so members can ask the bot to send that category privately or request exclusive links.
 
 Member workflow:
 
