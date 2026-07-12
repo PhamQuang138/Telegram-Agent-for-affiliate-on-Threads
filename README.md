@@ -427,7 +427,7 @@ AUTO_PUBLISH_RANDOM_LINKS_MIN_HOURS=3
 AUTO_PUBLISH_RANDOM_LINKS_MAX_HOURS=6
 ```
 
-Each auto post uses the same public format as `/publishlinks`: up to 15 public links, with buttons for private category links and exclusive links.
+Each auto post uses the same public format as `/publishlinks`: up to 15 public links, with buttons for private category links and exclusive links. The publisher remembers recent type/category pairs and avoids repeating them until it runs out of fresh categories.
 
 Call this endpoint from an external cron service every hour:
 

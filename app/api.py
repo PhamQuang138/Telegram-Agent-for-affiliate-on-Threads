@@ -27,6 +27,7 @@ app = FastAPI(title="POD Bot Tracking API")
 _telegram_application: Application | None = None
 logger = logging.getLogger(__name__)
 AUTO_RANDOM_LAST_RUN_KEY = "auto_random_links:last_run_ts"
+AUTO_RANDOM_HISTORY_KEY = "auto_random_links:recent_pairs"
 
 
 class DemandIntakeBody(BaseModel):
@@ -178,13 +179,52 @@ def _mark_random_link_cron_run(db: Session) -> None:
     db.commit()
 
 
+def _random_link_history(db: Session) -> list[str]:
+    row = db.get(AppSetting, AUTO_RANDOM_HISTORY_KEY)
+    if not row:
+        return []
+    try:
+        value = json.loads(row.value)
+    except (TypeError, JSONDecodeError):
+        return []
+    return [str(item) for item in value if str(item)]
+
+
+def _remember_random_link_pairs(db: Session, sent: list[dict]) -> None:
+    if not sent:
+        return
+    settings = get_settings()
+    limit = max(3, int(getattr(settings, "auto_publish_random_links_history_size", 12) or 12))
+    history = _random_link_history(db)
+    new_items = [f"{item['link_type_id']}:{item['category_id']}" for item in sent]
+    merged: list[str] = []
+    for item in [*new_items, *history]:
+        if item not in merged:
+            merged.append(item)
+    merged = merged[:limit]
+    now_ts = str(int(time.time()))
+    row = db.get(AppSetting, AUTO_RANDOM_HISTORY_KEY)
+    value = json.dumps(merged, ensure_ascii=False)
+    if row:
+        row.value = value
+        row.updated_at = now_ts
+    else:
+        db.add(AppSetting(key=AUTO_RANDOM_HISTORY_KEY, value=value, updated_at=now_ts))
+    db.commit()
+
+
 def _random_link_candidates(db: Session, count: int) -> list[dict]:
     pairs: list[dict] = []
     for link_type in categories_for_random_types(db):
         for category in categories_for_type(db, link_type):
-            pairs.append({"link_type_id": link_type, "category_id": category["category_id"], "count": category["count"]})
-    random.shuffle(pairs)
-    return pairs[:count]
+            pair_key = f"{link_type}:{category['category_id']}"
+            pairs.append({"link_type_id": link_type, "category_id": category["category_id"], "count": category["count"], "pair_key": pair_key})
+    history = set(_random_link_history(db))
+    fresh = [item for item in pairs if item["pair_key"] not in history]
+    fallback = [item for item in pairs if item["pair_key"] in history]
+    random.shuffle(fresh)
+    random.shuffle(fallback)
+    return [*fresh, *fallback][:count]
 
 
 def categories_for_random_types(db: Session) -> list[str]:
@@ -258,6 +298,7 @@ def publish_random_links_cron(
                 errors.append({"link_type_id": item["link_type_id"], "category_id": item["category_id"], "error": str(exc)})
         if sent:
             _mark_random_link_cron_run(db)
+            _remember_random_link_pairs(db, sent)
         return {"ok": True, "reason": reason, "sent": sent, "errors": errors}
 
 

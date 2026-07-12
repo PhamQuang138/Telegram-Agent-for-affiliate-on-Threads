@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base, AffiliateProduct, DailyLinkEntry, DemandOpportunity, ThreadsDemandAction, ThreadsDemandOpportunity, ThreadsPost, ThreadsPostLink, ThreadsPostMetric, ThreadsReply
-from app.models import AdminAffiliateLink
+from app.models import AdminAffiliateLink, AppSetting
 from app.services.angle_library import select_angle
 import app.services.angle_library as angle_library
 from app.services.content_diversity import should_reduce_repetition
@@ -1219,6 +1219,28 @@ def test_cleanup_cron_accepts_bearer_secret(monkeypatch) -> None:
     response = client.get("/api/cron/cleanup-daily-links", headers={"Authorization": "Bearer cron"})
     assert response.status_code == 200
     assert response.json()["cutoff_date"] == "2026-07-08"
+
+
+def test_random_link_candidates_avoid_recent_pairs(monkeypatch) -> None:
+    import app.api as api_module
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(api_module, "categories_for_random_types", lambda db: ["shopee_commission"])
+    monkeypatch.setattr(
+        api_module,
+        "categories_for_type",
+        lambda db, link_type: [
+            {"category_id": "fashion", "count": 10},
+            {"category_id": "home", "count": 10},
+        ],
+    )
+    with Session() as db:
+        db.add(AppSetting(key=api_module.AUTO_RANDOM_HISTORY_KEY, value='["shopee_commission:fashion"]', updated_at=""))
+        db.commit()
+        candidates = api_module._random_link_candidates(db, 1)
+    assert candidates[0]["category_id"] == "home"
 
 
 def test_main_vercel_does_not_start_polling(monkeypatch) -> None:
