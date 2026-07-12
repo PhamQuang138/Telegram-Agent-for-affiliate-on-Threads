@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     telegram_group_invite_url: str = Field(default="", alias="TELEGRAM_GROUP_INVITE_URL")
     telegram_group_display_name: str = Field(default="Nhom link uu dai", alias="TELEGRAM_GROUP_DISPLAY_NAME")
     telegram_daily_link_disclosure: str = Field(
-        default="Cac link tren la link tiep thi lien ket.",
+        default="Click button below.",
         alias="TELEGRAM_DAILY_LINK_DISCLOSURE",
     )
     telegram_daily_disable_link_preview: bool = Field(default=True, alias="TELEGRAM_DAILY_DISABLE_LINK_PREVIEW")
