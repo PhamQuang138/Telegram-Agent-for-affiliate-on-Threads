@@ -1,0 +1,16 @@
+name: Publish random Telegram links
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  publish-random-links:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger random link publisher
+        run: |
+          curl --fail --show-error --silent \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://podbot-snowy.vercel.app/api/cron/publish-random-links"
