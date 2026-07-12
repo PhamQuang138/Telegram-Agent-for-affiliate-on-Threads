@@ -266,6 +266,23 @@ def import_admin_links_csv(
                 duplicates += 1
                 continue
             seen_in_file.add(seen_key)
+            existing = db.scalar(
+                select(AdminAffiliateLink)
+                .where(
+                    AdminAffiliateLink.link_type_id == link_type_id,
+                    AdminAffiliateLink.category_id == category_id,
+                    AdminAffiliateLink.affiliate_url == url,
+                    AdminAffiliateLink.is_active == 1,
+                    AdminAffiliateLink.expires_at >= now_utc(),
+                )
+                .order_by(AdminAffiliateLink.created_at.desc(), AdminAffiliateLink.id.desc())
+                .limit(1)
+            )
+            if existing:
+                existing.display_name = product_name[:160] or existing.display_name
+                existing.expires_at = expires_at
+                duplicates += 1
+                continue
             content_hash = hashlib.sha256(f"{batch.id}|{url}".encode("utf-8")).hexdigest()
             link = AdminAffiliateLink(
                 batch_id=batch.id,
@@ -383,27 +400,27 @@ def categories_for_type(db: Session, link_type_id: str) -> list[dict]:
     if link_type_id not in valid_link_type_ids():
         return []
     rows = db.execute(
-        select(AdminAffiliateLink.category_id, func.count(AdminAffiliateLink.id))
+        select(AdminAffiliateLink.category_id, func.count(func.distinct(AdminAffiliateLink.affiliate_url)))
         .where(
             AdminAffiliateLink.link_type_id == link_type_id,
             AdminAffiliateLink.is_active == 1,
             AdminAffiliateLink.expires_at >= now_utc(),
         )
         .group_by(AdminAffiliateLink.category_id)
-        .order_by(func.count(AdminAffiliateLink.id).desc())
+        .order_by(func.count(func.distinct(AdminAffiliateLink.affiliate_url)).desc())
     ).all()
     return [{"category_id": str(row.category_id), "label": category_label(str(row.category_id)), "count": int(row[1])} for row in rows]
 
 
 def active_type_counts(db: Session) -> list[dict]:
     rows = db.execute(
-        select(AdminAffiliateLink.link_type_id, func.count(AdminAffiliateLink.id))
+        select(AdminAffiliateLink.link_type_id, func.count(func.distinct(AdminAffiliateLink.affiliate_url)))
         .where(
             AdminAffiliateLink.is_active == 1,
             AdminAffiliateLink.expires_at >= now_utc(),
         )
         .group_by(AdminAffiliateLink.link_type_id)
-        .order_by(func.count(AdminAffiliateLink.id).desc())
+        .order_by(func.count(func.distinct(AdminAffiliateLink.affiliate_url)).desc())
     ).all()
     return [{"link_type_id": str(row[0]), "label": link_type_name(str(row[0])), "count": int(row[1])} for row in rows]
 
@@ -511,15 +528,18 @@ def user_request_allowed(db: Session, telegram_user_id: int) -> tuple[bool, str]
 
 def link_stats(db: Session) -> dict:
     total = db.scalar(
-        select(func.count(AdminAffiliateLink.id)).where(AdminAffiliateLink.is_active == 1, AdminAffiliateLink.expires_at >= now_utc())
+        select(func.count(func.distinct(AdminAffiliateLink.affiliate_url))).where(
+            AdminAffiliateLink.is_active == 1,
+            AdminAffiliateLink.expires_at >= now_utc(),
+        )
     ) or 0
     by_type = db.execute(
-        select(AdminAffiliateLink.link_type_id, func.count(AdminAffiliateLink.id))
+        select(AdminAffiliateLink.link_type_id, func.count(func.distinct(AdminAffiliateLink.affiliate_url)))
         .where(AdminAffiliateLink.is_active == 1, AdminAffiliateLink.expires_at >= now_utc())
         .group_by(AdminAffiliateLink.link_type_id)
     ).all()
     by_category = db.execute(
-        select(AdminAffiliateLink.category_id, func.count(AdminAffiliateLink.id))
+        select(AdminAffiliateLink.category_id, func.count(func.distinct(AdminAffiliateLink.affiliate_url)))
         .where(AdminAffiliateLink.is_active == 1, AdminAffiliateLink.expires_at >= now_utc())
         .group_by(AdminAffiliateLink.category_id)
     ).all()

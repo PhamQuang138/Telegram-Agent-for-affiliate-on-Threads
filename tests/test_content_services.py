@@ -844,6 +844,36 @@ def test_admin_curated_delivery_caps_and_dedupes_urls() -> None:
         assert len({link.affiliate_url for link in private_links}) == 25
 
 
+def test_admin_csv_import_aggregates_existing_active_urls(tmp_path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+    first.write_text(
+        "Tên sản phẩm,Link ưu đãi,Tên ưu đãi,Danh mục sản phẩm\n"
+        "Áo mẫu cũ,https://s.shopee.vn/same,Hoa hồng Shopee,Thời trang\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "Tên sản phẩm,Link ưu đãi,Tên ưu đãi,Danh mục sản phẩm\n"
+        "Áo mẫu mới,https://s.shopee.vn/same,Hoa hồng Shopee,Thời trang\n"
+        "Áo mẫu khác,https://s.shopee.vn/other,Hoa hồng Shopee,Thời trang\n",
+        encoding="utf-8",
+    )
+    with Session() as db:
+        first_result = import_admin_links_csv(db, first, admin_user_id=1, group_chat_id="-100")
+        second_result = import_admin_links_csv(db, second, admin_user_id=1, group_chat_id="-100")
+        cats = admin_active_type_counts(db)
+        links = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=25, hard_cap=25)
+        assert first_result.added == 1
+        assert second_result.added == 1
+        assert second_result.duplicates == 1
+        assert cats[0]["count"] == 2
+        assert len(links) == 2
+        assert {link.affiliate_url for link in links} == {"https://s.shopee.vn/same", "https://s.shopee.vn/other"}
+
+
 def test_purchase_intent_rules_and_price_extract() -> None:
     ask_link = classify_purchase_intent("Cho mình xin link quạt mini để bàn dưới 200k với", "quạt mini")
     reco = classify_purchase_intent("Mọi người recommend áo đá bóng loại nào ổn?", "áo đá bóng")
