@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import Forbidden
+from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agents.threads_shopee_agent import (
@@ -78,6 +78,16 @@ from app.services.threads_sync_service import sync_account_posts, sync_all_accou
 from app.services.trend_service import collect_threads_keyword_snapshot, get_trending_keywords
 from app.services.topic_memory import is_topic_recently_used, record_topic_usage
 from app.services.feature_flags import feature_snapshot, is_feature_enabled
+
+
+async def _answer_callback(query, text: str | None = None, show_alert: bool = False) -> bool:
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+        return True
+    except BadRequest as exc:
+        if "query is too old" in str(exc).lower() or "query id is invalid" in str(exc).lower():
+            return False
+        raise
 from app.services.daily_link_catalog import (
     add_daily_product,
     daily_stats as daily_catalog_stats,
@@ -3075,7 +3085,7 @@ async def publish_type_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    await _answer_callback(query)
     if not is_link_admin(query.from_user.id if query.from_user else None):
         await query.message.reply_text("Ban khong co quyen publish link.")
         return
@@ -3099,7 +3109,7 @@ async def publish_category_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    await _answer_callback(query)
     if not is_link_admin(query.from_user.id if query.from_user else None):
         await query.message.reply_text("Ban khong co quyen publish link.")
         return
@@ -3135,13 +3145,13 @@ async def channel_get_links_callback(update: Update, context: ContextTypes.DEFAU
         return
     parts = (query.data or "").split(":")
     if len(parts) != 4 or not query.from_user:
-        await query.answer()
+        await _answer_callback(query)
         return
     link_type_id = _link_type_from_code(parts[2])
     category_id = parts[3]
     allow_all_categories = link_type_id == "exclusive_offer" and category_id == "all"
     if not link_type_id or (not allow_all_categories and category_id not in valid_category_ids()):
-        await query.answer("Loai link hoac danh muc khong hop le.", show_alert=True)
+        await _answer_callback(query, "Loai link hoac danh muc khong hop le.", show_alert=True)
         return
     await _deliver_private_links(update, context, query.from_user.id, query.message.chat_id, link_type_id, category_id, public_ack=False)
 
@@ -3193,7 +3203,7 @@ async def request_type_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    await _answer_callback(query)
     parts = (query.data or "").split(":")
     if len(parts) != 4:
         return
@@ -3232,7 +3242,7 @@ async def guide_links_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    await _answer_callback(query)
     if query.data == "ac:docq":
         await _show_request_categories(update, "exclusive_offer")
     else:
@@ -3246,7 +3256,7 @@ async def request_category_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    await _answer_callback(query)
     parts = (query.data or "").split(":")
     if len(parts) != 5:
         return
@@ -3278,14 +3288,14 @@ async def _deliver_private_links(
             if public_ack:
                 await query.message.reply_text("Ban dang yeu cau qua nhanh, vui long thu lai sau.")
             else:
-                await query.answer("Ban dang yeu cau qua nhanh, vui long thu lai sau.", show_alert=True)
+                await _answer_callback(query, "Ban dang yeu cau qua nhanh, vui long thu lai sau.", show_alert=True)
             return
         links = get_links_for_delivery(db, link_type_id, category_id, limit=25, hard_cap=25)
     if not links:
         if public_ack:
             await query.message.reply_text("Danh muc nay hien chua co link active.")
         else:
-            await query.answer("Danh muc nay hien chua co link active.", show_alert=True)
+            await _answer_callback(query, "Danh muc nay hien chua co link active.", show_alert=True)
         return
     with _db() as db:
         request = create_private_request(db, user_id, group_chat_id, link_type_id, category_id)
@@ -3299,7 +3309,7 @@ async def _deliver_private_links(
         if public_ack:
             await query.message.reply_text("Minh da gui danh sach vao tin nhan rieng cua ban.")
         else:
-            await query.answer("Minh da gui link vao tin nhan rieng cua ban.", show_alert=True)
+            await _answer_callback(query, "Minh da gui link vao tin nhan rieng cua ban.", show_alert=True)
     except Forbidden:
         username = get_settings().telegram_bot_username.strip().lstrip("@")
         url = f"https://t.me/{username}?start=links_{request.request_token}" if username else ""
@@ -3307,7 +3317,7 @@ async def _deliver_private_links(
         if public_ack:
             await query.message.reply_text("Ban can mo bot va bam Start de nhan link rieng.", reply_markup=keyboard)
         else:
-            await query.answer("Hay mo bot va bam Start de nhan link rieng.", show_alert=True)
+            await _answer_callback(query, "Hay mo bot va bam Start de nhan link rieng.", show_alert=True)
 
 
 async def cleanlinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
