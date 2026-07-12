@@ -1,7 +1,11 @@
 from json import JSONDecodeError
 import logging
+import json
+import random
+import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+import httpx
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 from sqlalchemy import text
@@ -15,13 +19,14 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import AppSetting
 from app.services.daily_link_cleanup import cleanup_expired_daily_links
-from app.services.admin_curated_links import cleanup_expired_admin_links
+from app.services.admin_curated_links import categories_for_type, cleanup_expired_admin_links, get_links_for_delivery
 from app.services.threads_repository import get_post_by_slug, get_post_link_by_slug, log_click
-from app.telegram_bot import build_application
+from app.telegram_bot import _channel_link_keyboard, _channel_link_post_text, build_application
 
 app = FastAPI(title="POD Bot Tracking API")
 _telegram_application: Application | None = None
 logger = logging.getLogger(__name__)
+AUTO_RANDOM_LAST_RUN_KEY = "auto_random_links:last_run_ts"
 
 
 class DemandIntakeBody(BaseModel):
@@ -135,6 +140,125 @@ def cleanup_daily_links_cron(
     if isinstance(legacy, dict):
         return {**legacy, "admin_curated": admin}
     return {"legacy_daily": legacy, "admin_curated": admin}
+
+
+def _cron_authorized(x_cron_secret: str | None, authorization: str | None, secret: str | None) -> None:
+    settings = get_settings()
+    bearer = authorization.removeprefix("Bearer ").strip() if authorization else ""
+    provided = x_cron_secret or bearer or secret or ""
+    if settings.cron_secret and provided != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+
+def _should_run_random_link_cron(db: Session) -> tuple[bool, str]:
+    settings = get_settings()
+    min_seconds = max(1, settings.auto_publish_random_links_min_hours) * 3600
+    max_seconds = max(settings.auto_publish_random_links_max_hours, settings.auto_publish_random_links_min_hours) * 3600
+    now_ts = int(time.time())
+    row = db.get(AppSetting, AUTO_RANDOM_LAST_RUN_KEY)
+    last_ts = int(row.value) if row and str(row.value).isdigit() else 0
+    elapsed = now_ts - last_ts if last_ts else max_seconds
+    if elapsed < min_seconds:
+        return False, "too_soon"
+    if elapsed >= max_seconds:
+        return True, "max_elapsed"
+    span = max(1, max_seconds - min_seconds)
+    probability = (elapsed - min_seconds) / span
+    return random.random() <= probability, "random_window"
+
+
+def _mark_random_link_cron_run(db: Session) -> None:
+    now_ts = str(int(time.time()))
+    row = db.get(AppSetting, AUTO_RANDOM_LAST_RUN_KEY)
+    if row:
+        row.value = now_ts
+        row.updated_at = now_ts
+    else:
+        db.add(AppSetting(key=AUTO_RANDOM_LAST_RUN_KEY, value=now_ts, updated_at=now_ts))
+    db.commit()
+
+
+def _random_link_candidates(db: Session, count: int) -> list[dict]:
+    pairs: list[dict] = []
+    for link_type in categories_for_random_types(db):
+        for category in categories_for_type(db, link_type):
+            pairs.append({"link_type_id": link_type, "category_id": category["category_id"], "count": category["count"]})
+    random.shuffle(pairs)
+    return pairs[:count]
+
+
+def categories_for_random_types(db: Session) -> list[str]:
+    from app.services.admin_curated_links import active_type_counts
+
+    types = [item["link_type_id"] for item in active_type_counts(db)]
+    random.shuffle(types)
+    return types
+
+
+def _send_telegram_channel_post(text_value: str, reply_markup: dict) -> dict:
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
+    if not settings.telegram_community_group_id:
+        raise RuntimeError("TELEGRAM_COMMUNITY_GROUP_ID missing")
+    with httpx.Client(timeout=20) as client:
+        response = client.post(
+            f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+            data={
+                "chat_id": settings.telegram_community_group_id,
+                "text": text_value,
+                "reply_markup": json.dumps(reply_markup, ensure_ascii=False),
+                "disable_web_page_preview": "true",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError(str(payload))
+        return payload
+
+
+@app.get("/api/cron/publish-random-links")
+def publish_random_links_cron(
+    x_cron_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+    secret: str | None = None,
+) -> dict:
+    _cron_authorized(x_cron_secret, authorization, secret)
+    settings = get_settings()
+    if not settings.auto_publish_random_links_enabled:
+        return {"ok": True, "skipped": "disabled"}
+    with SessionLocal() as db:
+        should_run, reason = _should_run_random_link_cron(db)
+        if not should_run:
+            return {"ok": True, "skipped": reason}
+        candidates = _random_link_candidates(db, max(1, settings.auto_publish_random_links_count))
+        sent = []
+        errors = []
+        for item in candidates:
+            links = get_links_for_delivery(db, item["link_type_id"], item["category_id"], limit=15, hard_cap=15)
+            if not links:
+                continue
+            try:
+                markup = _channel_link_keyboard(item["link_type_id"], item["category_id"]).to_dict()
+                payload = _send_telegram_channel_post(
+                    _channel_link_post_text(item["link_type_id"], item["category_id"], links),
+                    markup,
+                )
+                sent.append(
+                    {
+                        "link_type_id": item["link_type_id"],
+                        "category_id": item["category_id"],
+                        "message_id": ((payload.get("result") or {}).get("message_id")),
+                    }
+                )
+                time.sleep(0.5)
+            except Exception as exc:
+                logger.exception("Random link publish failed")
+                errors.append({"link_type_id": item["link_type_id"], "category_id": item["category_id"], "error": str(exc)})
+        if sent:
+            _mark_random_link_cron_run(db)
+        return {"ok": True, "reason": reason, "sent": sent, "errors": errors}
 
 
 @app.get("/go/{slug}")

@@ -72,6 +72,10 @@ TELEGRAM_WEBHOOK_URL=https://podbot-snowy.vercel.app/api/telegram/webhook
 TELEGRAM_WEBHOOK_SECRET=
 VERCEL=false
 CRON_SECRET=
+AUTO_PUBLISH_RANDOM_LINKS_ENABLED=true
+AUTO_PUBLISH_RANDOM_LINKS_COUNT=3
+AUTO_PUBLISH_RANDOM_LINKS_MIN_HOURS=3
+AUTO_PUBLISH_RANDOM_LINKS_MAX_HOURS=6
 
 BASE_URL=http://localhost:8000
 DATABASE_URL=sqlite:///./affiliate_agent.db
@@ -218,6 +222,10 @@ TELEGRAM_USE_WEBHOOK=true
 TELEGRAM_WEBHOOK_URL=https://podbot-snowy.vercel.app/api/telegram/webhook
 TELEGRAM_WEBHOOK_SECRET=<random-secret>
 CRON_SECRET=<random-secret>
+AUTO_PUBLISH_RANDOM_LINKS_ENABLED=true
+AUTO_PUBLISH_RANDOM_LINKS_COUNT=3
+AUTO_PUBLISH_RANDOM_LINKS_MIN_HOURS=3
+AUTO_PUBLISH_RANDOM_LINKS_MAX_HOURS=6
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ADMIN_USER_IDS=
@@ -258,9 +266,10 @@ Useful endpoints:
 GET /api/health
 POST /api/telegram/webhook
 GET /api/cron/cleanup-daily-links
+GET /api/cron/publish-random-links
 ```
 
-`vercel.json` schedules daily cleanup once per day. The cron endpoint accepts `Authorization: Bearer <CRON_SECRET>`, `X-Cron-Secret`, or `?secret=...`.
+`vercel.json` schedules daily cleanup once per day and random link publishing every hour. The random publisher only posts when the last run was 3-6 hours ago. Cron endpoints accept `Authorization: Bearer <CRON_SECRET>`, `X-Cron-Secret`, or `?secret=...`.
 
 ## Telegram Commands
 
@@ -408,6 +417,17 @@ Cleanup runs on startup, cron, and `/cleanlinks`.
 /cleanlinkspreview
 /cleanlinks
 ```
+
+Automatic channel publishing can post 3 random active categories every 3-6 hours:
+
+```env
+AUTO_PUBLISH_RANDOM_LINKS_ENABLED=true
+AUTO_PUBLISH_RANDOM_LINKS_COUNT=3
+AUTO_PUBLISH_RANDOM_LINKS_MIN_HOURS=3
+AUTO_PUBLISH_RANDOM_LINKS_MAX_HOURS=6
+```
+
+Each auto post uses the same public format as `/publishlinks`: up to 15 public links, with buttons for private category links and exclusive links.
 
 Admin-curated catalog tables:
 
