@@ -894,6 +894,25 @@ def test_admin_csv_import_can_force_exclusive_type(tmp_path) -> None:
         assert normal_links == []
 
 
+def test_exclusive_delivery_can_ignore_category(tmp_path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    csv_path = tmp_path / "exclusive.csv"
+    csv_path.write_text(
+        "Tên sản phẩm,Link ưu đãi,Tên ưu đãi,Danh mục sản phẩm\n"
+        "Quạt deal riêng,https://s.shopee.vn/ex-home,Hoa hồng Shopee,Gia dụng\n"
+        "Áo deal riêng,https://s.shopee.vn/ex-fashion,Hoa hồng Shopee,Thời trang\n",
+        encoding="utf-8",
+    )
+    with Session() as db:
+        import_admin_links_csv(db, csv_path, admin_user_id=1, group_chat_id="-100", forced_link_type_id="exclusive_offer")
+        all_links = get_admin_links_for_delivery(db, "exclusive_offer", "all", limit=25, hard_cap=25)
+        fashion_links = get_admin_links_for_delivery(db, "exclusive_offer", "fashion", limit=25, hard_cap=25)
+        assert len(all_links) == 2
+        assert len(fashion_links) == 1
+
+
 def test_purchase_intent_rules_and_price_extract() -> None:
     ask_link = classify_purchase_intent("Cho mình xin link quạt mini để bàn dưới 200k với", "quạt mini")
     reco = classify_purchase_intent("Mọi người recommend áo đá bóng loại nào ổn?", "áo đá bóng")

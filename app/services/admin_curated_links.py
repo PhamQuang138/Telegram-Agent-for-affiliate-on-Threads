@@ -470,21 +470,24 @@ def get_links_for_delivery(
     limit: int | None = None,
     hard_cap: int | None = None,
 ) -> list[AdminAffiliateLink]:
-    if link_type_id not in valid_link_type_ids() or category_id not in valid_category_ids():
+    allow_all_categories = link_type_id == "exclusive_offer" and category_id == "all"
+    if link_type_id not in valid_link_type_ids() or (not allow_all_categories and category_id not in valid_category_ids()):
         return []
     configured = max(1, get_settings().max_links_per_category)
     requested = max(1, limit if limit is not None else configured)
     cap = max(1, hard_cap if hard_cap is not None else configured)
     max_links = min(requested, cap)
+    conditions = [
+        AdminAffiliateLink.link_type_id == link_type_id,
+        AdminAffiliateLink.is_active == 1,
+        AdminAffiliateLink.expires_at >= now_utc(),
+    ]
+    if not allow_all_categories:
+        conditions.append(AdminAffiliateLink.category_id == category_id)
     rows = list(
         db.scalars(
             select(AdminAffiliateLink)
-            .where(
-                AdminAffiliateLink.link_type_id == link_type_id,
-                AdminAffiliateLink.category_id == category_id,
-                AdminAffiliateLink.is_active == 1,
-                AdminAffiliateLink.expires_at >= now_utc(),
-            )
+            .where(*conditions)
             .order_by(AdminAffiliateLink.created_at.desc(), AdminAffiliateLink.batch_id.desc(), AdminAffiliateLink.id.desc())
             .limit(max_links * 4)
         )
@@ -596,9 +599,10 @@ def link_stats(db: Session) -> dict:
 
 
 def build_private_link_messages(link_type_id: str, category_id: str, links: list[AdminAffiliateLink]) -> list[str]:
+    category_name = "Tổng hợp" if category_id == "all" else category_label(category_id)
     header = [
         f"{link_type_name(link_type_id)}",
-        f"Danh mục: {category_label(category_id)}",
+        f"Danh mục: {category_name}",
         "",
     ]
     footer = [

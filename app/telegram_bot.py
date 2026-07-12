@@ -2669,7 +2669,7 @@ def _channel_link_keyboard(link_type_id: str, category_id: str) -> InlineKeyboar
     bot_username = get_settings().telegram_bot_username.strip().lstrip("@")
     rows = [[InlineKeyboardButton("Lấy riêng danh mục này", callback_data=f"ac:get:{code}:{category_id}")]]
     if link_type_id != "exclusive_offer":
-        rows.append([InlineKeyboardButton("Lấy link độc quyền", callback_data=f"ac:get:{_link_type_code('exclusive_offer')}:{category_id}")])
+        rows.append([InlineKeyboardButton("Lấy link độc quyền", callback_data=f"ac:get:{_link_type_code('exclusive_offer')}:all")])
     if bot_username:
         rows.append([InlineKeyboardButton("Mở bot", url=f"https://t.me/{bot_username}")])
     return InlineKeyboardMarkup(rows)
@@ -3136,7 +3136,8 @@ async def channel_get_links_callback(update: Update, context: ContextTypes.DEFAU
         return
     link_type_id = _link_type_from_code(parts[2])
     category_id = parts[3]
-    if not link_type_id or category_id not in valid_category_ids():
+    allow_all_categories = link_type_id == "exclusive_offer" and category_id == "all"
+    if not link_type_id or (not allow_all_categories and category_id not in valid_category_ids()):
         await query.answer("Loai link hoac danh muc khong hop le.", show_alert=True)
         return
     await _deliver_private_links(update, context, query.from_user.id, query.message.chat_id, link_type_id, category_id, public_ack=False)
