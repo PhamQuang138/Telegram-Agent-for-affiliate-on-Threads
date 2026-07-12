@@ -24,8 +24,10 @@ from app.services.daily_link_repository import get_categories_for_date_and_type,
 from app.services.affiliate_link_type_classifier import classify_affiliate_link_type
 from app.services import daily_link_cleanup
 from app.services.admin_curated_links import (
+    active_type_counts as admin_active_type_counts,
     cleanup_expired_admin_links,
     close_batch as close_admin_link_batch,
+    import_admin_links_csv,
     get_links_for_delivery as get_admin_links_for_delivery,
     ingest_admin_message,
     parse_link_lines,
@@ -793,6 +795,34 @@ def test_manual_demand_duplicate_by_url(monkeypatch) -> None:
     assert first["created"]
     assert not second["created"]
     assert second["reason"] == "duplicate"
+
+
+def test_admin_curated_csv_import_classifies_mixed_catalog(tmp_path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    csv_path = tmp_path / "mixed.csv"
+    csv_path.write_text(
+        "\ufeffTên sản phẩm,Link ưu đãi,Tên ưu đãi,Danh mục sản phẩm,Tên cửa hàng\n"
+        "Áo thể thao đá bóng co giãn,https://s.shopee.vn/ao1,Ưu đãi độc quyền,Thời trang,Shop A\n"
+        "Quạt mini để bàn văn phòng,https://s.shopee.vn/quat1,Hoa hồng Shopee,Gia dụng,Shop B\n"
+        "Áo thể thao đá bóng co giãn,https://s.shopee.vn/ao1,Ưu đãi độc quyền,Thời trang,Shop A\n",
+        encoding="utf-8",
+    )
+    with Session() as db:
+        result = import_admin_links_csv(db, csv_path, admin_user_id=1, group_chat_id="-100")
+        assert result.total_rows == 3
+        assert result.added == 2
+        assert result.duplicates == 1
+        assert result.type_counts["exclusive_offer"] == 1
+        assert result.type_counts["shopee_commission"] == 1
+        assert result.category_counts["fashion"] == 1
+        assert result.category_counts["home"] == 1
+        types = admin_active_type_counts(db)
+        assert {item["link_type_id"] for item in types} == {"exclusive_offer", "shopee_commission"}
+        links = get_admin_links_for_delivery(db, "exclusive_offer", "fashion", limit=50)
+        assert len(links) == 1
+        assert links[0].affiliate_url.endswith("/ao1")
 
 
 def test_purchase_intent_rules_and_price_extract() -> None:

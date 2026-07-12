@@ -280,6 +280,8 @@ GET /api/cron/cleanup-daily-links
 /endlinkbatch
 /cancellinkbatch
 /currentlinkbatch
+/importlinks
+/publishlinks
 /linkstats
 /cleanlinks
 /cleanlinkspreview
@@ -302,7 +304,7 @@ Frozen commands return a short frozen-feature message instead of running the old
 
 ## Daily Link Catalog
 
-Daily Link Catalog is now admin-curated. The bot does not fetch URLs, scrape pages, call Shopee, call Threads, crawl websites, or use AI in this workflow. It only stores links that a configured admin sends directly inside `TELEGRAM_COMMUNITY_GROUP_ID` while an admin batch is active.
+Daily Link Catalog is now admin-curated. The bot does not fetch URLs, scrape pages, call Shopee, call Threads, crawl websites, or use AI in this workflow. It only stores links that a configured admin sends directly or uploads as a CSV.
 
 The catalog has two levels:
 
@@ -333,6 +335,38 @@ https://s.shopee.vn/...
 
 After `/endlinkbatch`, the bot posts a guide message to `TELEGRAM_COMMUNITY_GROUP_ID` when the batch contains at least one link. Admin can still run the batch inside the group, but private chat is cleaner because members should receive links through bot DM.
 
+CSV workflow for a mixed catalog:
+
+```text
+/importlinks
+upload CSV with caption /importlinks
+/publishlinks
+choose campaign type
+choose product category
+```
+
+The CSV can contain many product categories in one file. The bot classifies each row with local rules from CSV columns and product names, then stores links into separate batches by:
+
+```text
+Campaign type + Product category
+```
+
+Supported CSV columns include:
+
+```text
+Tên sản phẩm
+Tên ưu đãi
+Link ưu đãi
+Tên cửa hàng
+Danh mục sản phẩm
+Ngành hàng
+Product Name
+Affiliate Link
+Category
+```
+
+After `/publishlinks`, the bot posts one channel message for the selected category with a button. The channel message does not expose affiliate URLs.
+
 Member workflow:
 
 ```text
@@ -340,13 +374,15 @@ Member workflow:
 /links
 ```
 
-The bot shows category/type menus in the group, then sends up to `MAX_LINKS_PER_CATEGORY` links privately to the member who clicked. If the member has not started the bot, the group message shows a deep-link button so they can open the bot and receive the pending request.
+The bot shows category/type menus or channel buttons, then sends up to `MAX_LINKS_PER_CATEGORY` links privately to the member who clicked. The hard cap is 15 links per request. If the member has not started the bot, the bot asks them to open the bot and press Start.
 
 Admin commands:
 
 ```text
 /currentlinkbatch
 /cancellinkbatch
+/importlinks
+/publishlinks
 /linkstats
 /cleanlinks
 /cleanlinkspreview
@@ -799,7 +835,7 @@ ENABLE_AUTOMATIC_CATEGORY_IMPORT=false
 ENABLE_SHOPEE_FETCH=false
 ```
 
-Admin-curated Telegram links must come from `/linkbatch` and admin messages in the configured group, not CSV files.
+Legacy daily CSV commands are separate from `/importlinks`. Use `/importlinks` for the current channel catalog workflow.
 
 ## Draft Refreshing
 

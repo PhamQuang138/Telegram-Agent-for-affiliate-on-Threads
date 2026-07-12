@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 import re
 import secrets
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -12,8 +15,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import AdminAffiliateLink, AdminLinkBatch, PrivateLinkRequest
-from app.services.affiliate_link_type_classifier import link_type_name, valid_link_type_ids
-from app.services.product_category_classifier import category_label, valid_category_ids
+from app.services.affiliate_link_type_classifier import classify_affiliate_link_type, link_type_name, valid_link_type_ids
+from app.services.product_category_classifier import category_label, classify_product_category, valid_category_ids
 
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
@@ -28,6 +31,18 @@ class IntakeResult:
     duplicates: int
     ignored: int
     batch: AdminLinkBatch | None
+
+
+@dataclass
+class CsvImportResult:
+    total_rows: int
+    added: int
+    duplicates: int
+    ignored: int
+    errors: list[str]
+    type_counts: dict[str, int]
+    category_counts: dict[str, int]
+    batches: list[AdminLinkBatch]
 
 
 def now_utc() -> datetime:
@@ -177,6 +192,138 @@ def parse_link_lines(text: str, start_index: int = 1) -> list[dict | None]:
     return rows
 
 
+def import_admin_links_csv(
+    db: Session,
+    csv_path: str | Path,
+    admin_user_id: int,
+    group_chat_id: int | str,
+) -> CsvImportResult:
+    """Import a mixed Shopee affiliate CSV into channel-ready category batches."""
+    path = Path(csv_path)
+    batches: dict[tuple[str, str], AdminLinkBatch] = {}
+    errors: list[str] = []
+    type_counts: dict[str, int] = defaultdict(int)
+    category_counts: dict[str, int] = defaultdict(int)
+    added = 0
+    duplicates = 0
+    ignored = 0
+    total_rows = 0
+    expires_at = now_utc() + timedelta(days=get_settings().link_retention_days)
+    seen_in_file: set[tuple[str, str, str]] = set()
+
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError("CSV khong co header.")
+        for row_number, row in enumerate(reader, start=2):
+            total_rows += 1
+            row = {str(key or "").strip(): str(value or "").strip() for key, value in row.items()}
+            product_name = _first_field(row, PRODUCT_NAME_FIELDS)
+            affiliate_url = _first_field(row, AFFILIATE_URL_FIELDS)
+            if not affiliate_url:
+                ignored += 1
+                continue
+            if not URL_RE.search(affiliate_url):
+                ignored += 1
+                errors.append(f"Dong {row_number}: khong thay affiliate URL hop le")
+                continue
+            if not product_name:
+                product_name = f"Link ưu đãi {total_rows}"
+
+            link_type = classify_affiliate_link_type(row, filename=path.name)
+            category = classify_product_category(row, product_name=product_name, shop_name=_first_field(row, SHOP_NAME_FIELDS))
+            link_type_id = link_type["link_type_id"]
+            category_id = category["category_id"]
+            key = (link_type_id, category_id)
+            batch = batches.get(key)
+            if not batch:
+                batch = AdminLinkBatch(
+                    admin_user_id=admin_user_id,
+                    group_chat_id=str(group_chat_id),
+                    link_type_id=link_type_id,
+                    category_id=category_id,
+                    status="completed",
+                    closed_at=now_utc(),
+                    link_count=0,
+                )
+                db.add(batch)
+                db.flush()
+                batches[key] = batch
+
+            url = URL_RE.search(affiliate_url).group(0).strip()
+            seen_key = (link_type_id, category_id, url)
+            if seen_key in seen_in_file:
+                duplicates += 1
+                continue
+            seen_in_file.add(seen_key)
+            content_hash = hashlib.sha256(f"{batch.id}|{url}".encode("utf-8")).hexdigest()
+            link = AdminAffiliateLink(
+                batch_id=batch.id,
+                admin_user_id=admin_user_id,
+                group_chat_id=str(group_chat_id),
+                link_type_id=link_type_id,
+                category_id=category_id,
+                display_name=product_name[:160],
+                affiliate_url=url,
+                content_hash=content_hash,
+                is_active=1,
+                expires_at=expires_at,
+            )
+            db.add(link)
+            db.flush()
+            added += 1
+            batch.link_count += 1
+            type_counts[link_type_id] += 1
+            category_counts[category_id] += 1
+    for batch in batches.values():
+        if batch.link_count <= 0:
+            batch.status = "empty"
+    db.commit()
+    return CsvImportResult(
+        total_rows=total_rows,
+        added=added,
+        duplicates=duplicates,
+        ignored=ignored,
+        errors=errors[:8],
+        type_counts=dict(type_counts),
+        category_counts=dict(category_counts),
+        batches=list(batches.values()),
+    )
+
+
+PRODUCT_NAME_FIELDS = (
+    "Tên sản phẩm",
+    "Tên ưu đãi",
+    "Product Name",
+    "Name",
+    "name",
+    "title",
+)
+AFFILIATE_URL_FIELDS = (
+    "Link ưu đãi",
+    "Affiliate Link",
+    "Affiliate URL",
+    "Link tiếp thị",
+    "Tracking Link",
+    "url",
+)
+SHOP_NAME_FIELDS = (
+    "Tên cửa hàng",
+    "Shop name",
+    "Shop",
+    "seller",
+)
+
+
+def _first_field(row: dict, fields: tuple[str, ...]) -> str:
+    normalized = {str(key).strip().lower(): str(value or "").strip() for key, value in row.items()}
+    for field in fields:
+        value = normalized.get(field.lower())
+        if value:
+            return value
+    return ""
+
+
 def close_batch(db: Session, admin_user_id: int, group_chat_id: int | str, status: str = "completed") -> AdminLinkBatch | None:
     batch = active_batch_for_admin(db, admin_user_id, group_chat_id)
     if not batch:
@@ -236,6 +383,19 @@ def categories_for_type(db: Session, link_type_id: str) -> list[dict]:
         .order_by(func.count(AdminAffiliateLink.id).desc())
     ).all()
     return [{"category_id": str(row.category_id), "label": category_label(str(row.category_id)), "count": int(row[1])} for row in rows]
+
+
+def active_type_counts(db: Session) -> list[dict]:
+    rows = db.execute(
+        select(AdminAffiliateLink.link_type_id, func.count(AdminAffiliateLink.id))
+        .where(
+            AdminAffiliateLink.is_active == 1,
+            AdminAffiliateLink.expires_at >= now_utc(),
+        )
+        .group_by(AdminAffiliateLink.link_type_id)
+        .order_by(func.count(AdminAffiliateLink.id).desc())
+    ).all()
+    return [{"link_type_id": str(row[0]), "label": link_type_name(str(row[0])), "count": int(row[1])} for row in rows]
 
 
 def get_links_for_delivery(db: Session, link_type_id: str, category_id: str, limit: int | None = None) -> list[AdminAffiliateLink]:
