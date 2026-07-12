@@ -2600,7 +2600,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not request:
                 await update.message.reply_text("Yeu cau link da het han hoac khong hop le. Hay quay lai group va bam lai /links.")
                 return
-            links = get_links_for_delivery(db, request.link_type_id, request.category_id)
+            links = get_links_for_delivery(db, request.link_type_id, request.category_id, limit=25, hard_cap=25)
             for text in build_private_link_messages(request.link_type_id, request.category_id, links):
                 await context.bot.send_message(chat_id=update.effective_user.id, text=text, disable_web_page_preview=True)
             complete_private_request(db, request)
@@ -2882,7 +2882,7 @@ async def publish_category_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
         return
     with _db() as db:
-        links = get_links_for_delivery(db, link_type_id, category_id)
+        links = get_links_for_delivery(db, link_type_id, category_id, limit=15, hard_cap=15)
     if not links:
         await query.message.reply_text("Danh muc nay hien chua co link active.")
         return
@@ -3045,7 +3045,7 @@ async def _deliver_private_links(
             else:
                 await query.answer("Ban dang yeu cau qua nhanh, vui long thu lai sau.", show_alert=True)
             return
-        links = get_links_for_delivery(db, link_type_id, category_id)
+        links = get_links_for_delivery(db, link_type_id, category_id, limit=25, hard_cap=25)
     if not links:
         if public_ack:
             await query.message.reply_text("Danh muc nay hien chua co link active.")

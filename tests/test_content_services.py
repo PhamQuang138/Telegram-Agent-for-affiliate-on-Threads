@@ -825,6 +825,25 @@ def test_admin_curated_csv_import_classifies_mixed_catalog(tmp_path) -> None:
         assert links[0].affiliate_url.endswith("/ao1")
 
 
+def test_admin_curated_delivery_caps_and_dedupes_urls() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    with Session() as db:
+        batch = start_admin_link_batch(db, 1, "-100", "shopee_commission", "fashion")
+        lines = []
+        for index in range(30):
+            url_index = index if index != 29 else 1
+            lines.append(f"Áo mẫu {index} | https://s.shopee.vn/item{url_index}")
+        ingest_admin_message(db, 1, "-100", "\n".join(lines))
+        close_admin_link_batch(db, 1, "-100")
+        public_links = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=15, hard_cap=15)
+        private_links = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=25, hard_cap=25)
+        assert len(public_links) == 15
+        assert len(private_links) == 25
+        assert len({link.affiliate_url for link in private_links}) == 25
+
+
 def test_purchase_intent_rules_and_price_extract() -> None:
     ask_link = classify_purchase_intent("Cho mình xin link quạt mini để bàn dưới 200k với", "quạt mini")
     reco = classify_purchase_intent("Mọi người recommend áo đá bóng loại nào ổn?", "áo đá bóng")

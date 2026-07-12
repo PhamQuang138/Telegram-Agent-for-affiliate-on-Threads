@@ -374,7 +374,7 @@ Member workflow:
 /links
 ```
 
-The bot shows category/type menus or channel buttons, then sends up to `MAX_LINKS_PER_CATEGORY` links privately to the member who clicked. The hard cap is 15 links per request. If the member has not started the bot, the bot asks them to open the bot and press Start.
+The bot shows category/type menus or channel buttons. Public channel posts show up to 15 links. Private requests send up to 25 non-duplicate links for the selected category. If the member has not started the bot, the bot asks them to open the bot and press Start.
 
 Admin commands:
 

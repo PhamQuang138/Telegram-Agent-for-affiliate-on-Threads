@@ -135,10 +135,19 @@ def ingest_admin_message(db: Session, admin_user_id: int, group_chat_id: int | s
     added = 0
     duplicates = 0
     ignored = 0
+    seen_urls = set(
+        db.scalars(
+            select(AdminAffiliateLink.affiliate_url).where(AdminAffiliateLink.batch_id == batch.id)
+        ).all()
+    )
     for item in parsed:
         if not item:
             ignored += 1
             continue
+        if item["affiliate_url"] in seen_urls:
+            duplicates += 1
+            continue
+        seen_urls.add(item["affiliate_url"])
         content_hash = hashlib.sha256(
             f"{batch.id}|{item['affiliate_url']}".encode("utf-8")
         ).hexdigest()
@@ -162,6 +171,7 @@ def ingest_admin_message(db: Session, admin_user_id: int, group_chat_id: int | s
         except IntegrityError:
             db.rollback()
             batch = db.get(AdminLinkBatch, batch.id)
+            seen_urls.discard(item["affiliate_url"])
             duplicates += 1
     db.commit()
     return IntakeResult(added=added, duplicates=duplicates, ignored=ignored, batch=batch)
@@ -398,11 +408,20 @@ def active_type_counts(db: Session) -> list[dict]:
     return [{"link_type_id": str(row[0]), "label": link_type_name(str(row[0])), "count": int(row[1])} for row in rows]
 
 
-def get_links_for_delivery(db: Session, link_type_id: str, category_id: str, limit: int | None = None) -> list[AdminAffiliateLink]:
+def get_links_for_delivery(
+    db: Session,
+    link_type_id: str,
+    category_id: str,
+    limit: int | None = None,
+    hard_cap: int | None = None,
+) -> list[AdminAffiliateLink]:
     if link_type_id not in valid_link_type_ids() or category_id not in valid_category_ids():
         return []
-    max_links = min(limit or get_settings().max_links_per_category, get_settings().max_links_per_category, 15)
-    return list(
+    configured = max(1, get_settings().max_links_per_category)
+    requested = max(1, limit if limit is not None else configured)
+    cap = max(1, hard_cap if hard_cap is not None else configured)
+    max_links = min(requested, cap)
+    rows = list(
         db.scalars(
             select(AdminAffiliateLink)
             .where(
@@ -412,9 +431,20 @@ def get_links_for_delivery(db: Session, link_type_id: str, category_id: str, lim
                 AdminAffiliateLink.expires_at >= now_utc(),
             )
             .order_by(AdminAffiliateLink.created_at.desc(), AdminAffiliateLink.batch_id.desc(), AdminAffiliateLink.id.desc())
-            .limit(max_links)
+            .limit(max_links * 4)
         )
     )
+    unique: list[AdminAffiliateLink] = []
+    seen: set[str] = set()
+    for link in rows:
+        key = link.affiliate_url.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(link)
+        if len(unique) >= max_links:
+            break
+    return unique
 
 
 def create_private_request(db: Session, telegram_user_id: int, group_chat_id: int | str, link_type_id: str, category_id: str) -> PrivateLinkRequest:
@@ -519,7 +549,7 @@ def build_private_link_messages(link_type_id: str, category_id: str, links: list
         get_settings().telegram_daily_link_disclosure,
     ]
     lines = header[:]
-    for index, link in enumerate(links[:15], start=1):
+    for index, link in enumerate(links[:25], start=1):
         candidate = [f"{index}. {link.display_name}", link.affiliate_url, ""]
         if len("\n".join(lines + candidate + footer)) > 3500 and len(lines) > len(header):
             lines.extend(footer)
