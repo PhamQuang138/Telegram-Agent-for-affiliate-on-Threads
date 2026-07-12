@@ -220,6 +220,7 @@ def import_admin_links_csv(
     total_rows = 0
     expires_at = now_utc() + timedelta(days=get_settings().link_retention_days)
     seen_in_file: set[tuple[str, str, str]] = set()
+    records: list[dict] = []
 
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -244,67 +245,99 @@ def import_admin_links_csv(
             category = classify_product_category(row, product_name=product_name, shop_name=_first_field(row, SHOP_NAME_FIELDS))
             link_type_id = link_type["link_type_id"]
             category_id = category["category_id"]
-            key = (link_type_id, category_id)
-            batch = batches.get(key)
-            if not batch:
-                batch = AdminLinkBatch(
-                    admin_user_id=admin_user_id,
-                    group_chat_id=str(group_chat_id),
-                    link_type_id=link_type_id,
-                    category_id=category_id,
-                    status="completed",
-                    closed_at=now_utc(),
-                    link_count=0,
-                )
-                db.add(batch)
-                db.flush()
-                batches[key] = batch
-
             url = URL_RE.search(affiliate_url).group(0).strip()
             seen_key = (link_type_id, category_id, url)
             if seen_key in seen_in_file:
                 duplicates += 1
                 continue
             seen_in_file.add(seen_key)
-            existing = db.scalar(
-                select(AdminAffiliateLink)
-                .where(
-                    AdminAffiliateLink.link_type_id == link_type_id,
-                    AdminAffiliateLink.category_id == category_id,
-                    AdminAffiliateLink.affiliate_url == url,
-                    AdminAffiliateLink.is_active == 1,
-                    AdminAffiliateLink.expires_at >= now_utc(),
+            records.append(
+                {
+                    "link_type_id": link_type_id,
+                    "category_id": category_id,
+                    "display_name": product_name[:160],
+                    "affiliate_url": url,
+                }
+            )
+
+    if not records:
+        return CsvImportResult(
+            total_rows=total_rows,
+            added=0,
+            duplicates=duplicates,
+            ignored=ignored,
+            errors=errors[:8],
+            type_counts={},
+            category_counts={},
+            batches=[],
+        )
+
+    existing_by_key: dict[tuple[str, str, str], AdminAffiliateLink] = {}
+    urls = sorted({record["affiliate_url"] for record in records})
+    for url_chunk in _chunks(urls, 500):
+        existing_rows = db.scalars(
+            select(AdminAffiliateLink)
+            .where(
+                AdminAffiliateLink.affiliate_url.in_(url_chunk),
+                AdminAffiliateLink.is_active == 1,
+                AdminAffiliateLink.expires_at >= now_utc(),
+            )
+            .order_by(AdminAffiliateLink.created_at.desc(), AdminAffiliateLink.id.desc())
+        ).all()
+        for link in existing_rows:
+            existing_by_key.setdefault((link.link_type_id, link.category_id, link.affiliate_url), link)
+
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for record in records:
+        key = (record["link_type_id"], record["category_id"], record["affiliate_url"])
+        existing = existing_by_key.get(key)
+        if existing:
+            existing.display_name = record["display_name"] or existing.display_name
+            existing.expires_at = expires_at
+            duplicates += 1
+            continue
+        grouped[(record["link_type_id"], record["category_id"])].append(record)
+
+    for (link_type_id, category_id), group_records in grouped.items():
+        batch = AdminLinkBatch(
+            admin_user_id=admin_user_id,
+            group_chat_id=str(group_chat_id),
+            link_type_id=link_type_id,
+            category_id=category_id,
+            status="completed",
+            closed_at=now_utc(),
+            link_count=len(group_records),
+        )
+        db.add(batch)
+        batches[(link_type_id, category_id)] = batch
+    if batches:
+        db.flush()
+
+    links_to_add: list[AdminAffiliateLink] = []
+    for (link_type_id, category_id), group_records in grouped.items():
+        batch = batches[(link_type_id, category_id)]
+        for record in group_records:
+            url = record["affiliate_url"]
+            links_to_add.append(
+                AdminAffiliateLink(
+                    batch_id=batch.id,
+                    admin_user_id=admin_user_id,
+                    group_chat_id=str(group_chat_id),
+                    link_type_id=link_type_id,
+                    category_id=category_id,
+                    display_name=record["display_name"],
+                    affiliate_url=url,
+                    content_hash=hashlib.sha256(f"{batch.id}|{url}".encode("utf-8")).hexdigest(),
+                    is_active=1,
+                    expires_at=expires_at,
                 )
-                .order_by(AdminAffiliateLink.created_at.desc(), AdminAffiliateLink.id.desc())
-                .limit(1)
             )
-            if existing:
-                existing.display_name = product_name[:160] or existing.display_name
-                existing.expires_at = expires_at
-                duplicates += 1
-                continue
-            content_hash = hashlib.sha256(f"{batch.id}|{url}".encode("utf-8")).hexdigest()
-            link = AdminAffiliateLink(
-                batch_id=batch.id,
-                admin_user_id=admin_user_id,
-                group_chat_id=str(group_chat_id),
-                link_type_id=link_type_id,
-                category_id=category_id,
-                display_name=product_name[:160],
-                affiliate_url=url,
-                content_hash=content_hash,
-                is_active=1,
-                expires_at=expires_at,
-            )
-            db.add(link)
-            db.flush()
             added += 1
-            batch.link_count += 1
             type_counts[link_type_id] += 1
             category_counts[category_id] += 1
-    for batch in batches.values():
-        if batch.link_count <= 0:
-            batch.status = "empty"
+    if links_to_add:
+        db.add_all(links_to_add)
+        db.flush()
     db.commit()
     return CsvImportResult(
         total_rows=total_rows,
@@ -349,6 +382,10 @@ def _first_field(row: dict, fields: tuple[str, ...]) -> str:
         if value:
             return value
     return ""
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
 
 
 def close_batch(db: Session, admin_user_id: int, group_chat_id: int | str, status: str = "completed") -> AdminLinkBatch | None:

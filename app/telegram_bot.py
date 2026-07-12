@@ -2801,6 +2801,11 @@ async def importlinks_document(update: Update, context: ContextTypes.DEFAULT_TYP
     if not file_name.lower().endswith(".csv"):
         await message.reply_text("File import phai la CSV.")
         return
+    if document.file_size and document.file_size > 8 * 1024 * 1024:
+        await message.reply_text(
+            "File CSV hoi lon, bot van se import nhung tren Vercel co the cham. "
+            "Neu bi timeout, hay chia file thanh cac lo nho hon."
+        )
     await message.reply_text("Da nhan CSV. Dang phan loai va import vao kho channel...")
     temp_path = ""
     try:
