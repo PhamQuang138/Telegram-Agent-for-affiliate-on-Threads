@@ -2708,6 +2708,7 @@ def _csv_import_summary(result) -> str:
         f"Tổng dòng: {result.total_rows}",
         f"Link mới: {result.added}",
         f"Trùng trong file: {result.duplicates}",
+        f"Giá cập nhật: {getattr(result, 'price_updates', 0)}",
         f"Bỏ qua: {result.ignored}",
         "",
         "Theo loại:",

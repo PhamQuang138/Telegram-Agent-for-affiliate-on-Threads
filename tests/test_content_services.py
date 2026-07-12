@@ -858,9 +858,9 @@ def test_admin_csv_import_aggregates_existing_active_urls(tmp_path) -> None:
         encoding="utf-8",
     )
     second.write_text(
-        "Tên sản phẩm,Link ưu đãi,Tên ưu đãi,Danh mục sản phẩm\n"
-        "Áo mẫu mới,https://s.shopee.vn/same,Hoa hồng Shopee,Thời trang\n"
-        "Áo mẫu khác,https://s.shopee.vn/other,Hoa hồng Shopee,Thời trang\n",
+        "Tên sản phẩm,Link ưu đãi,Tên ưu đãi,Danh mục sản phẩm,Giá\n"
+        "Áo mẫu mới,https://s.shopee.vn/same,Hoa hồng Shopee,Thời trang,99k\n"
+        "Áo mẫu khác,https://s.shopee.vn/other,Hoa hồng Shopee,Thời trang,120k\n",
         encoding="utf-8",
     )
     with Session() as db:
@@ -871,9 +871,11 @@ def test_admin_csv_import_aggregates_existing_active_urls(tmp_path) -> None:
         assert first_result.added == 1
         assert second_result.added == 1
         assert second_result.duplicates == 1
+        assert second_result.price_updates == 1
         assert cats[0]["count"] == 2
         assert len(links) == 2
         assert {link.affiliate_url for link in links} == {"https://s.shopee.vn/same", "https://s.shopee.vn/other"}
+        assert {link.affiliate_url: link.price for link in links}["https://s.shopee.vn/same"] == "99k"
 
 
 def test_admin_csv_import_can_force_exclusive_type(tmp_path) -> None:

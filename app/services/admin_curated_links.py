@@ -39,6 +39,7 @@ class CsvImportResult:
     added: int
     duplicates: int
     ignored: int
+    price_updates: int
     errors: list[str]
     type_counts: dict[str, int]
     category_counts: dict[str, int]
@@ -223,6 +224,7 @@ def import_admin_links_csv(
     added = 0
     duplicates = 0
     ignored = 0
+    price_updates = 0
     total_rows = 0
     expires_at = now_utc() + timedelta(days=get_settings().link_retention_days)
     seen_in_file: set[tuple[str, str, str]] = set()
@@ -274,6 +276,7 @@ def import_admin_links_csv(
             added=0,
             duplicates=duplicates,
             ignored=ignored,
+            price_updates=0,
             errors=errors[:8],
             type_counts={},
             category_counts={},
@@ -301,7 +304,10 @@ def import_admin_links_csv(
         existing = existing_by_key.get(key)
         if existing:
             existing.display_name = record["display_name"] or existing.display_name
+            old_price = existing.price or ""
             existing.price = record["price"] or existing.price
+            if record["price"] and record["price"] != old_price:
+                price_updates += 1
             existing.expires_at = expires_at
             duplicates += 1
             continue
@@ -354,6 +360,7 @@ def import_admin_links_csv(
         added=added,
         duplicates=duplicates,
         ignored=ignored,
+        price_updates=price_updates,
         errors=errors[:8],
         type_counts=dict(type_counts),
         category_counts=dict(category_counts),
