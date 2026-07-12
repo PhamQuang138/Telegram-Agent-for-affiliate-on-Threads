@@ -269,7 +269,7 @@ GET /api/cron/cleanup-daily-links
 GET /api/cron/publish-random-links
 ```
 
-`vercel.json` schedules daily cleanup once per day and random link publishing every hour. The random publisher only posts when the last run was 3-6 hours ago. Cron endpoints accept `Authorization: Bearer <CRON_SECRET>`, `X-Cron-Secret`, or `?secret=...`.
+`vercel.json` schedules daily cleanup once per day. Vercel Hobby only supports daily cron jobs, so random link publishing should be triggered by an external scheduler every hour. The endpoint itself only posts when the last run was 3-6 hours ago. Cron endpoints accept `Authorization: Bearer <CRON_SECRET>`, `X-Cron-Secret`, or `?secret=...`.
 
 ## Telegram Commands
 
@@ -428,6 +428,12 @@ AUTO_PUBLISH_RANDOM_LINKS_MAX_HOURS=6
 ```
 
 Each auto post uses the same public format as `/publishlinks`: up to 15 public links, with buttons for private category links and exclusive links.
+
+Call this endpoint from an external cron service every hour:
+
+```text
+GET https://podbot-snowy.vercel.app/api/cron/publish-random-links?secret=<CRON_SECRET>
+```
 
 Admin-curated catalog tables:
 

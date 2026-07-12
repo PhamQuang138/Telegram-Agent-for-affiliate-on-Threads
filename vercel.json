@@ -15,10 +15,6 @@
     {
       "path": "/api/cron/cleanup-daily-links",
       "schedule": "0 20 * * *"
-    },
-    {
-      "path": "/api/cron/publish-random-links",
-      "schedule": "0 * * * *"
     }
   ]
 }
