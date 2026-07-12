@@ -400,6 +400,30 @@ def _thread_text(post: ThreadsPost) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def _manual_support_cta() -> str:
+    settings = get_settings()
+    telegram_url = (settings.threads_telegram_group_url or settings.telegram_group_invite_url).strip()
+    if not telegram_url:
+        raise ValueError("Chua cau hinh THREADS_TELEGRAM_GROUP_URL hoac TELEGRAM_GROUP_INVITE_URL.")
+    return (
+        "Nếu thấy hay mọi người có thể ủng hộ mình qua nhóm này nha, mỗi ngày channel đều cập nhật các link sản phẩm giá tốt "
+        "theo từng danh mục để mọi người dễ tìm. Chỉ cần bấm chọn mục mình quan tâm, bot sẽ gửi riêng danh sách link tương ứng cho bạn.\n"
+        f"{telegram_url}"
+    )
+
+
+def _parse_manual_threadpost_args(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
+    args = list(context.args or [])
+    account_name = ""
+    account_names = {str(account.get("name") or "").lower() for account in load_threads_accounts() if account.get("name")}
+    if args and args[0].lower() in account_names:
+        account_name = args.pop(0)
+    content = " ".join(args).strip()
+    if not content and update.message and update.message.reply_to_message:
+        content = (update.message.reply_to_message.text or update.message.reply_to_message.caption or "").strip()
+    return account_name, content
+
+
 def _short_product_name(name: str, limit: int = 120) -> str:
     clean = " ".join(name.split())
     return clean if len(clean) <= limit else clean[: limit - 3].rstrip() + "..."
@@ -731,6 +755,7 @@ Workflow cũ vẫn dùng được:
 /checkmodels [limit]
 /approve <post_id>
 /post <post_id> [account_name]
+/threadpost [account_name] <noi dung>
 /replylinks <post_id>
 /delete_thread <post_id> confirm
 /delete <post_id>
@@ -1762,6 +1787,104 @@ async def post_to_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _reply_status(update)
 
 
+async def threadpost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_required(update):
+        await update.message.reply_text("Lenh nay chi danh cho admin.")
+        return
+    account_name, content = _parse_manual_threadpost_args(update, context)
+    if not content:
+        await update.message.reply_text(
+            "Dung: /threadpost [account_name] <noi dung>\n"
+            "Hoac reply vao tin nhan chua noi dung roi go /threadpost [account_name]."
+        )
+        return
+    if len(content) > 500:
+        await update.message.reply_text(f"Noi dung dai {len(content)} ky tu. Threads text post nen <= 500 ky tu.")
+        return
+    try:
+        cta = _manual_support_cta()
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+    if len(cta) > 500:
+        await update.message.reply_text(f"CTA Telegram dang dai {len(cta)} ky tu, can rut gon duoi 500 ky tu.")
+        return
+
+    try:
+        if account_name:
+            account = get_threads_account(account_name)
+        else:
+            account = select_account_for_post(
+                {
+                    "keyword": "manual support post",
+                    "product_name": "",
+                    "content_type": "engagement",
+                    "content_goal": "engagement",
+                    "content": content,
+                },
+                load_threads_accounts(),
+            )
+    except ThreadsAccountError as exc:
+        await update.message.reply_text(f"Chua chon duoc Threads account: {exc}")
+        return
+
+    await update.message.reply_text(f"Dang dang Threads thu cong bang account: {account['name']}...")
+    try:
+        result = publish_threads_post(content, account=account)
+    except ThreadsPostingError as exc:
+        await update.message.reply_text(f"Chua dang duoc Threads: {exc}")
+        return
+
+    threads_post_id = str(result.get("id") or result.get("post_id") or "")
+    reply_id = ""
+    reply_error = ""
+    if threads_post_id:
+        try:
+            reply_result = publish_threads_reply(threads_post_id, cta, account=account)
+            reply_id = str(reply_result.get("id") or reply_result.get("post_id") or "")
+        except ThreadsPostingError as exc:
+            reply_error = str(exc)
+
+    with _db() as db:
+        post = ThreadsPost(
+            keyword="manual support post",
+            product_name="",
+            content=content,
+            cta="",
+            hashtags="[]",
+            status="posted",
+            quality_score=100,
+            content_type="engagement",
+            content_goal="engagement",
+            target_platform="threads",
+            threads_post_id=threads_post_id,
+            posted_account_name=account["name"],
+            posted_account_user_id=account["user_id"],
+            telegram_cta_text=cta,
+            telegram_cta_mode="reply",
+            telegram_cta_reply_id=reply_id or None,
+            telegram_cta_posted_at=datetime.now() if reply_id else None,
+            telegram_cta_status="posted" if reply_id else ("failed" if reply_error else "skipped"),
+        )
+        db.add(post)
+        db.commit()
+        db.refresh(post)
+        post_id = post.id
+
+    if reply_error:
+        await update.message.reply_text(
+            f"Da dang bai Threads #{post_id} bang {account['name']}.\n"
+            f"Threads ID: {threads_post_id or 'unknown'}\n"
+            f"Nhung comment Telegram CTA bi loi: {reply_error}"
+        )
+    else:
+        await update.message.reply_text(
+            f"Da dang bai Threads #{post_id} bang {account['name']}.\n"
+            f"Threads ID: {threads_post_id or 'unknown'}\n"
+            f"CTA comment: {'posted' if reply_id else 'skipped'}"
+        )
+
+
 async def replylinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text("Dùng: /replylinks <post_id>")
@@ -2675,6 +2798,7 @@ Threads:
 /regenerate <post_id>
 /approve <post_id>
 /post <post_id> [account_name]
+/threadpost [account_name] <noi dung>
 /retrytelegramcta <post_id>
 
 System:
@@ -3794,6 +3918,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("regenerate", regenerate))
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("post", post_to_threads))
+    app.add_handler(CommandHandler("threadpost", threadpost))
+    app.add_handler(CommandHandler("supportpost", threadpost))
     app.add_handler(CommandHandler("retrytelegramcta", retrytelegramcta))
     app.add_handler(CommandHandler("delete", delete))
     app.add_handler(MessageHandler(filters.Document.ALL, importlinks_document))

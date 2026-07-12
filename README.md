@@ -295,6 +295,8 @@ GET /api/cron/cleanup-daily-links
 /regenerate <post_id>
 /approve <post_id>
 /post <post_id> [account_name]
+/threadpost [account_name] <content>
+/supportpost [account_name] <content>
 /retrytelegramcta <post_id>
 /delete <post_id>
 
@@ -882,6 +884,22 @@ Post a draft:
 /post <post_id>
 /post <post_id> acc1
 ```
+
+Post manual content and automatically add the Telegram support CTA as a reply:
+
+```text
+/threadpost Nội dung bài viết Threads
+/threadpost acc2 Nội dung bài viết Threads
+```
+
+You can also reply to a Telegram message that contains the post text:
+
+```text
+/threadpost
+/threadpost acc2
+```
+
+`/supportpost` is an alias for `/threadpost`.
 
 By default, the main Threads post does not include the affiliate link. The bot posts one bundled reply/comment containing 3-4 links when grouped links exist.
 
