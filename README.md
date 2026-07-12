@@ -281,6 +281,7 @@ GET /api/cron/cleanup-daily-links
 /cancellinkbatch
 /currentlinkbatch
 /importlinks
+/endimportlinks
 /publishlinks
 /linkstats
 /cleanlinks
@@ -339,13 +340,14 @@ CSV workflow for a mixed catalog:
 
 ```text
 /importlinks
-upload CSV with caption /importlinks
+upload one or more CSV files within 15 minutes
+/endimportlinks
 /publishlinks
 choose campaign type
 choose product category
 ```
 
-The CSV can contain many product categories in one file. The bot classifies each row with local rules from CSV columns and product names, then stores links into separate batches by:
+The CSV can contain many product categories in one file. After `/importlinks`, the bot enters a 15-minute CSV intake session, so multiple CSV files can be sent one after another without captions. The bot classifies each row with local rules from CSV columns and product names, then stores links into separate batches by:
 
 ```text
 Campaign type + Product category

@@ -251,6 +251,52 @@ def _pending_engagement_key(user_id: int) -> str:
     return f"pending_engagement:{user_id}"
 
 
+def _pending_importlinks_key(user_id: int) -> str:
+    return f"pending_importlinks:{user_id}"
+
+
+def _save_pending_importlinks(user_id: int, ttl_seconds: int = 900) -> None:
+    with _db() as db:
+        key = _pending_importlinks_key(user_id)
+        setting = db.get(AppSetting, key)
+        payload = {"expires_at": str(int(time.time()) + ttl_seconds)}
+        value = json.dumps(payload, ensure_ascii=False)
+        now = datetime.now().isoformat()
+        if setting:
+            setting.value = value
+            setting.updated_at = now
+        else:
+            db.add(AppSetting(key=key, value=value, updated_at=now))
+        db.commit()
+
+
+def _has_pending_importlinks(user_id: int) -> bool:
+    with _db() as db:
+        setting = db.get(AppSetting, _pending_importlinks_key(user_id))
+        if not setting:
+            return False
+        try:
+            payload = json.loads(setting.value)
+            expires_at = int(payload.get("expires_at", 0))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            db.delete(setting)
+            db.commit()
+            return False
+        if expires_at < int(time.time()):
+            db.delete(setting)
+            db.commit()
+            return False
+        return True
+
+
+def _clear_pending_importlinks(user_id: int) -> None:
+    with _db() as db:
+        setting = db.get(AppSetting, _pending_importlinks_key(user_id))
+        if setting:
+            db.delete(setting)
+            db.commit()
+
+
 def _save_pending_engagement(user_id: int, payload: dict[str, str]) -> None:
     with _db() as db:
         key = _pending_engagement_key(user_id)
@@ -2618,6 +2664,7 @@ Admin link intake:
 /cancellinkbatch
 /currentlinkbatch
 /importlinks
+/endimportlinks
 /publishlinks
 /linkstats
 
@@ -2772,13 +2819,24 @@ async def importlinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _batch_storage_group_id(update):
         await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID de luu kho link channel.")
         return
+    _save_pending_importlinks(update.effective_user.id)
     await update.message.reply_text(
-        "Gui file CSV vao chat nay voi caption /importlinks.\n\n"
+        "Da bat che do nhan CSV trong 15 phut.\n"
+        "Gui mot hoac nhieu file CSV vao chat nay, co caption /importlinks hoac khong deu duoc.\n\n"
         "Bot se tu phan loai theo cot CSV va ten san pham:\n"
         "- loai link: Shopee/Xtra/San pham/Doc quyen\n"
         "- danh muc: thoi trang, gia dung, dien tu, the thao...\n\n"
-        "Sau khi import xong, dung /publishlinks de chon danh muc dang len channel."
+        "Sau khi import xong, dung /publishlinks de chon danh muc dang len channel.\n"
+        "Dung /endimportlinks neu muon tat che do nhan CSV som."
     )
+
+
+async def endimportlinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_required(update):
+        await update.message.reply_text(_admin_group_denied_text(update))
+        return
+    _clear_pending_importlinks(update.effective_user.id)
+    await update.message.reply_text("Da tat che do nhan CSV /importlinks.")
 
 
 async def importlinks_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2789,7 +2847,10 @@ async def importlinks_document(update: Update, context: ContextTypes.DEFAULT_TYP
     document = message.document
     file_name = document.file_name or "links.csv"
     caption = (message.caption or "").strip()
-    if not caption.startswith("/importlinks"):
+    explicit_import = caption.startswith("/importlinks")
+    if explicit_import:
+        _save_pending_importlinks(user.id)
+    elif not _has_pending_importlinks(user.id):
         return
     if not _admin_required(update):
         await message.reply_text("Lenh nay chi danh cho admin.")
@@ -3696,6 +3757,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("cancellinkbatch", cancellinkbatch))
     app.add_handler(CommandHandler("currentlinkbatch", currentlinkbatch))
     app.add_handler(CommandHandler("importlinks", importlinks))
+    app.add_handler(CommandHandler("endimportlinks", endimportlinks))
     app.add_handler(CommandHandler("publishlinks", publishlinks))
     app.add_handler(CommandHandler("linkstats", linkstats))
     app.add_handler(CommandHandler("cleanlinks", cleanlinks))
