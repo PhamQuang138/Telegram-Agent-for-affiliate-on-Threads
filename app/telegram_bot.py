@@ -255,11 +255,11 @@ def _pending_importlinks_key(user_id: int) -> str:
     return f"pending_importlinks:{user_id}"
 
 
-def _save_pending_importlinks(user_id: int, ttl_seconds: int = 900) -> None:
+def _save_pending_importlinks(user_id: int, ttl_seconds: int = 900, forced_link_type_id: str = "") -> None:
     with _db() as db:
         key = _pending_importlinks_key(user_id)
         setting = db.get(AppSetting, key)
-        payload = {"expires_at": str(int(time.time()) + ttl_seconds)}
+        payload = {"expires_at": str(int(time.time()) + ttl_seconds), "forced_link_type_id": forced_link_type_id}
         value = json.dumps(payload, ensure_ascii=False)
         now = datetime.now().isoformat()
         if setting:
@@ -270,23 +270,23 @@ def _save_pending_importlinks(user_id: int, ttl_seconds: int = 900) -> None:
         db.commit()
 
 
-def _has_pending_importlinks(user_id: int) -> bool:
+def _load_pending_importlinks(user_id: int) -> dict[str, str] | None:
     with _db() as db:
         setting = db.get(AppSetting, _pending_importlinks_key(user_id))
         if not setting:
-            return False
+            return None
         try:
             payload = json.loads(setting.value)
             expires_at = int(payload.get("expires_at", 0))
         except (TypeError, ValueError, json.JSONDecodeError):
             db.delete(setting)
             db.commit()
-            return False
+            return None
         if expires_at < int(time.time()):
             db.delete(setting)
             db.commit()
-            return False
-        return True
+            return None
+        return {str(key): str(value) for key, value in payload.items()}
 
 
 def _clear_pending_importlinks(user_id: int) -> None:
@@ -295,6 +295,28 @@ def _clear_pending_importlinks(user_id: int) -> None:
         if setting:
             db.delete(setting)
             db.commit()
+
+
+def _parse_importlinks_forced_type(args: list[str] | tuple[str, ...]) -> str:
+    if not args:
+        return ""
+    raw = " ".join(args).strip().lower().replace("-", "_")
+    aliases = {
+        "docquyen": "exclusive_offer",
+        "doc_quyen": "exclusive_offer",
+        "exclusive": "exclusive_offer",
+        "exclusive_offer": "exclusive_offer",
+        "uu_dai_doc_quyen": "exclusive_offer",
+        "xtra": "xtra_commission",
+        "shopee": "shopee_commission",
+        "product": "product_commission",
+        "san_pham": "product_commission",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    if raw in valid_link_type_ids():
+        return raw
+    return ""
 
 
 def _save_pending_engagement(user_id: int, payload: dict[str, str]) -> None:
@@ -2943,13 +2965,20 @@ async def importlinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _batch_storage_group_id(update):
         await update.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID de luu kho link channel.")
         return
-    _save_pending_importlinks(update.effective_user.id)
+    forced_link_type_id = _parse_importlinks_forced_type(context.args)
+    if context.args and not forced_link_type_id:
+        await update.message.reply_text("Loai link import khong hop le. Vi du: /importlinks exclusive_offer hoac /importlinks docquyen")
+        return
+    _save_pending_importlinks(update.effective_user.id, forced_link_type_id=forced_link_type_id)
+    forced_line = f"Che do ep loai link: {link_type_name(forced_link_type_id)}\n" if forced_link_type_id else ""
     await update.message.reply_text(
         "Da bat che do nhan CSV trong 15 phut.\n"
         "Gui mot hoac nhieu file CSV vao chat nay, co caption /importlinks hoac khong deu duoc.\n\n"
+        f"{forced_line}"
         "Bot se tu phan loai theo cot CSV va ten san pham:\n"
         "- loai link: Shopee/Xtra/San pham/Doc quyen\n"
         "- danh muc: thoi trang, gia dung, dien tu, the thao...\n\n"
+        "Neu file la link doc quyen nhung cot CSV giong link thuong, dung /importlinks docquyen de ep loai.\n"
         "Sau khi import xong, dung /publishlinks de chon danh muc dang len channel.\n"
         "Dung /endimportlinks neu muon tat che do nhan CSV som."
     )
@@ -2972,10 +3001,22 @@ async def importlinks_document(update: Update, context: ContextTypes.DEFAULT_TYP
     file_name = document.file_name or "links.csv"
     caption = (message.caption or "").strip()
     explicit_import = caption.startswith("/importlinks")
+    forced_link_type_id = ""
     if explicit_import:
-        _save_pending_importlinks(user.id)
-    elif not _has_pending_importlinks(user.id):
-        return
+        try:
+            caption_args = shlex.split(caption.partition(" ")[2].strip())
+        except ValueError:
+            caption_args = caption.partition(" ")[2].strip().split()
+        forced_link_type_id = _parse_importlinks_forced_type(caption_args)
+        if caption_args and not forced_link_type_id:
+            await message.reply_text("Loai link import khong hop le. Vi du caption: /importlinks exclusive_offer")
+            return
+        _save_pending_importlinks(user.id, forced_link_type_id=forced_link_type_id)
+    else:
+        pending = _load_pending_importlinks(user.id)
+        if not pending:
+            return
+        forced_link_type_id = pending.get("forced_link_type_id", "")
     if not _admin_required(update):
         await message.reply_text("Lenh nay chi danh cho admin.")
         return
@@ -2999,7 +3040,7 @@ async def importlinks_document(update: Update, context: ContextTypes.DEFAULT_TYP
             temp_path = tmp.name
         await tg_file.download_to_drive(custom_path=temp_path)
         with _db() as db:
-            result = import_admin_links_csv(db, temp_path, user.id, target_group)
+            result = import_admin_links_csv(db, temp_path, user.id, target_group, forced_link_type_id=forced_link_type_id)
             cleanup_expired_admin_links(db)
         await message.reply_text(_csv_import_summary(result))
     except Exception as exc:

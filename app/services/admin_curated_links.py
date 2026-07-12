@@ -207,6 +207,7 @@ def import_admin_links_csv(
     csv_path: str | Path,
     admin_user_id: int,
     group_chat_id: int | str,
+    forced_link_type_id: str | None = None,
 ) -> CsvImportResult:
     """Import a mixed Shopee affiliate CSV into channel-ready category batches."""
     path = Path(csv_path)
@@ -243,7 +244,7 @@ def import_admin_links_csv(
 
             link_type = classify_affiliate_link_type(row, filename=path.name)
             category = classify_product_category(row, product_name=product_name, shop_name=_first_field(row, SHOP_NAME_FIELDS))
-            link_type_id = link_type["link_type_id"]
+            link_type_id = forced_link_type_id if forced_link_type_id in valid_link_type_ids() else link_type["link_type_id"]
             category_id = category["category_id"]
             url = URL_RE.search(affiliate_url).group(0).strip()
             seen_key = (link_type_id, category_id, url)

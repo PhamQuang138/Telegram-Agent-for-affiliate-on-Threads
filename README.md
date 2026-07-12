@@ -355,6 +355,13 @@ The CSV can contain many product categories in one file. After `/importlinks`, t
 Campaign type + Product category
 ```
 
+If a CSV is for exclusive links but its columns look like normal Shopee/Xtra links, force the campaign type:
+
+```text
+/importlinks docquyen
+/importlinks exclusive_offer
+```
+
 Supported CSV columns include:
 
 ```text
