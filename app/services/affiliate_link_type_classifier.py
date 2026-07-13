@@ -8,6 +8,22 @@ from pathlib import Path
 from app.config import get_settings
 
 LINK_TYPES_PATH = Path(__file__).resolve().parents[2] / "data" / "affiliate_link_types.json"
+VIETNAMESE_ASCII_MAP = {
+    ord("\u0111"): "d",
+    ord("\u0110"): "D",
+    ord("\u0103"): "a",
+    ord("\u0102"): "A",
+    ord("\u00e2"): "a",
+    ord("\u00c2"): "A",
+    ord("\u00ea"): "e",
+    ord("\u00ca"): "E",
+    ord("\u00f4"): "o",
+    ord("\u00d4"): "O",
+    ord("\u01a1"): "o",
+    ord("\u01a0"): "O",
+    ord("\u01b0"): "u",
+    ord("\u01af"): "U",
+}
 
 TYPE_SOURCE_FIELDS = (
     "loai hoa hong",
@@ -30,7 +46,13 @@ CAMPAIGN_NAME_FIELDS = (
 
 
 def normalize_text(value: str | None) -> str:
-    value = (value or "").replace("đ", "d").replace("Đ", "D")
+    value = value or ""
+    if any(marker in value for marker in ("\u00c3", "\u00c4", "\u00c6", "\u00e1\u00ba", "\u00e1\u00bb")):
+        try:
+            value = value.encode("latin1").decode("utf-8")
+        except UnicodeError:
+            pass
+    value = value.replace("\u00c4\u2018", "d").replace("\u00c4\u0090", "D").translate(VIETNAMESE_ASCII_MAP)
     value = unicodedata.normalize("NFKD", value)
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     value = value.lower()

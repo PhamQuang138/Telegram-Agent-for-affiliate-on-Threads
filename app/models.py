@@ -207,6 +207,19 @@ class PrivateLinkRequest(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PrivateLinkDelivery(Base):
+    __tablename__ = "private_link_deliveries"
+    __table_args__ = (UniqueConstraint("telegram_user_id", "affiliate_url", name="uq_private_link_delivery_user_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("private_link_requests.id"), nullable=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    link_type_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    category_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    affiliate_url: Mapped[str] = mapped_column(Text, nullable=False)
+    delivered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class ThreadsPostMetric(Base):
     __tablename__ = "threads_post_metrics"
     __table_args__ = (UniqueConstraint("account_name", "threads_media_id", name="uq_threads_metric_account_media"),)

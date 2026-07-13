@@ -28,10 +28,12 @@ from app.services.admin_curated_links import (
     build_private_link_messages,
     cleanup_expired_admin_links,
     close_batch as close_admin_link_batch,
+    create_private_request,
     import_admin_links_csv,
     get_links_for_delivery as get_admin_links_for_delivery,
     ingest_admin_message,
     parse_link_lines,
+    record_private_link_delivery,
     start_batch as start_admin_link_batch,
 )
 from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
@@ -43,6 +45,7 @@ from app.services import manual_demand_intake
 from app.services.feature_flags import is_feature_enabled
 from app.services.platform_url_parser import parse_platform_url
 from app.services.purchase_intent import classify_purchase_intent
+from app.services.product_category_classifier import classify_product_category
 from app.services.trend_service import GoogleSuggestProvider
 from app.services import learning_engine
 from agents.threads_shopee_agent import _openrouter_reset_at, _soft_parse_json
@@ -818,11 +821,11 @@ def test_admin_curated_csv_import_classifies_mixed_catalog(tmp_path) -> None:
         assert result.duplicates == 1
         assert result.type_counts["exclusive_offer"] == 1
         assert result.type_counts["shopee_commission"] == 1
-        assert result.category_counts["fashion"] == 1
+        assert result.category_counts["sports"] == 1
         assert result.category_counts["home"] == 1
         types = admin_active_type_counts(db)
         assert {item["link_type_id"] for item in types} == {"exclusive_offer", "shopee_commission"}
-        links = get_admin_links_for_delivery(db, "exclusive_offer", "fashion", limit=50)
+        links = get_admin_links_for_delivery(db, "exclusive_offer", "sports", limit=50)
         assert len(links) == 1
         assert links[0].affiliate_url.endswith("/ao1")
 
@@ -839,11 +842,42 @@ def test_admin_curated_delivery_caps_and_dedupes_urls() -> None:
             lines.append(f"Áo mẫu {index} | https://s.shopee.vn/item{url_index}")
         ingest_admin_message(db, 1, "-100", "\n".join(lines))
         close_admin_link_batch(db, 1, "-100")
-        public_links = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=15, hard_cap=15)
+        public_links = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=20, hard_cap=20)
         private_links = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=25, hard_cap=25)
-        assert len(public_links) == 15
+        assert len(public_links) == 20
         assert len(private_links) == 25
         assert len({link.affiliate_url for link in private_links}) == 25
+
+
+def test_private_delivery_avoids_links_already_sent_to_user() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    with Session() as db:
+        batch = start_admin_link_batch(db, 1, "-100", "shopee_commission", "fashion")
+        lines = [f"Áo mẫu {index} | https://s.shopee.vn/useritem{index}" for index in range(30)]
+        ingest_admin_message(db, 1, "-100", "\n".join(lines))
+        close_admin_link_batch(db, 1, "-100")
+        first = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=25, hard_cap=25, telegram_user_id=123)
+        request = create_private_request(db, 123, "-100", "shopee_commission", "fashion")
+        record_private_link_delivery(db, request, first)
+        second = get_admin_links_for_delivery(db, "shopee_commission", "fashion", limit=25, hard_cap=25, telegram_user_id=123)
+        first_urls = {link.affiliate_url for link in first}
+        second_urls = {link.affiliate_url for link in second}
+        assert len(first) == 25
+        assert len(second) == 25
+        assert len(second_urls - first_urls) == 5
+        assert list(second_urls - first_urls)
+
+
+def test_product_category_strong_product_signal_overrides_generic_column() -> None:
+    result = classify_product_category(
+        {"Danh mục sản phẩm": "Thời trang"},
+        product_name="Áo thể thao đá bóng co giãn cho nam",
+        shop_name="Shop A",
+    )
+    assert result["category_id"] == "sports"
+    assert result["reason"] == "strong product keyword override"
 
 
 def test_admin_csv_import_aggregates_existing_active_urls(tmp_path) -> None:

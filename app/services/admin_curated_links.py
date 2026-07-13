@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import AdminAffiliateLink, AdminLinkBatch, PrivateLinkRequest
+from app.models import AdminAffiliateLink, AdminLinkBatch, PrivateLinkDelivery, PrivateLinkRequest
 from app.services.affiliate_link_type_classifier import classify_affiliate_link_type, link_type_name, valid_link_type_ids
 from app.services.product_category_classifier import category_label, classify_product_category, valid_category_ids
 
@@ -501,6 +501,7 @@ def get_links_for_delivery(
     category_id: str,
     limit: int | None = None,
     hard_cap: int | None = None,
+    telegram_user_id: int | None = None,
 ) -> list[AdminAffiliateLink]:
     allow_all_categories = link_type_id == "exclusive_offer" and category_id == "all"
     if link_type_id not in valid_link_type_ids() or (not allow_all_categories and category_id not in valid_category_ids()):
@@ -521,20 +522,69 @@ def get_links_for_delivery(
             select(AdminAffiliateLink)
             .where(*conditions)
             .order_by(AdminAffiliateLink.created_at.desc(), AdminAffiliateLink.batch_id.desc(), AdminAffiliateLink.id.desc())
-            .limit(max_links * 4)
+            .limit(max_links * 10)
         )
     )
-    unique: list[AdminAffiliateLink] = []
+    delivered_urls: set[str] = set()
+    if telegram_user_id:
+        delivered_urls = {
+            str(url).strip()
+            for url in db.scalars(
+                select(PrivateLinkDelivery.affiliate_url).where(
+                    PrivateLinkDelivery.telegram_user_id == telegram_user_id,
+                )
+            )
+            if str(url).strip()
+        }
+
+    fresh: list[AdminAffiliateLink] = []
+    fallback: list[AdminAffiliateLink] = []
     seen: set[str] = set()
     for link in rows:
         key = link.affiliate_url.strip()
         if key in seen:
             continue
         seen.add(key)
-        unique.append(link)
-        if len(unique) >= max_links:
+        if telegram_user_id and key in delivered_urls:
+            fallback.append(link)
+        else:
+            fresh.append(link)
+        if len(fresh) >= max_links:
             break
-    return unique
+    return [*fresh, *fallback][:max_links]
+
+
+def record_private_link_delivery(db: Session, request: PrivateLinkRequest, links: list[AdminAffiliateLink]) -> int:
+    urls = [link.affiliate_url.strip() for link in links if link.affiliate_url.strip()]
+    if not urls:
+        return 0
+    existing = {
+        str(url).strip()
+        for url in db.scalars(
+            select(PrivateLinkDelivery.affiliate_url).where(
+                PrivateLinkDelivery.telegram_user_id == request.telegram_user_id,
+                PrivateLinkDelivery.affiliate_url.in_(urls),
+            )
+        )
+        if str(url).strip()
+    }
+    added = 0
+    for link in links:
+        url = link.affiliate_url.strip()
+        if not url or url in existing:
+            continue
+        delivery = PrivateLinkDelivery(
+            request_id=request.id,
+            telegram_user_id=request.telegram_user_id,
+            link_type_id=link.link_type_id,
+            category_id=link.category_id,
+            affiliate_url=url,
+        )
+        db.add(delivery)
+        existing.add(url)
+        added += 1
+    db.commit()
+    return added
 
 
 def create_private_request(db: Session, telegram_user_id: int, group_chat_id: int | str, link_type_id: str, category_id: str) -> PrivateLinkRequest:

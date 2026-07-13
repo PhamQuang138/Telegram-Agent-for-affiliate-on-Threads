@@ -570,6 +570,26 @@ def _migrate_admin_curated_link_tables() -> None:
         connection.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_private_link_requests_request_token ON private_link_requests (request_token)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_requests_telegram_user_id ON private_link_requests (telegram_user_id)")
         connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_requests_status ON private_link_requests (status)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS private_link_deliveries (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                request_id INTEGER,
+                telegram_user_id INTEGER NOT NULL,
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                affiliate_url TEXT NOT NULL,
+                delivered_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                CONSTRAINT uq_private_link_delivery_user_url UNIQUE (telegram_user_id, affiliate_url),
+                FOREIGN KEY(request_id) REFERENCES private_link_requests (id)
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_request_id ON private_link_deliveries (request_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_telegram_user_id ON private_link_deliveries (telegram_user_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_link_type_id ON private_link_deliveries (link_type_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_category_id ON private_link_deliveries (category_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_delivered_at ON private_link_deliveries (delivered_at)")
 
 
 def _migrate_admin_curated_link_tables_postgres() -> None:
@@ -635,6 +655,25 @@ def _migrate_admin_curated_link_tables_postgres() -> None:
             """
         )
         connection.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_private_link_requests_request_token ON private_link_requests (request_token)")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS private_link_deliveries (
+                id SERIAL PRIMARY KEY,
+                request_id INTEGER REFERENCES private_link_requests(id),
+                telegram_user_id INTEGER NOT NULL,
+                link_type_id VARCHAR(64) NOT NULL,
+                category_id VARCHAR(64) NOT NULL,
+                affiliate_url TEXT NOT NULL,
+                delivered_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                CONSTRAINT uq_private_link_delivery_user_url UNIQUE (telegram_user_id, affiliate_url)
+            )
+            """
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_request_id ON private_link_deliveries (request_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_telegram_user_id ON private_link_deliveries (telegram_user_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_link_type_id ON private_link_deliveries (link_type_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_category_id ON private_link_deliveries (category_id)")
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_private_link_deliveries_delivered_at ON private_link_deliveries (delivered_at)")
 
 
 def _allow_duplicate_post_link_affiliate_urls() -> None:

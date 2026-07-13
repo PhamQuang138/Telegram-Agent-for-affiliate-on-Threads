@@ -140,6 +140,7 @@ from app.services.admin_curated_links import (
     is_admin as is_link_admin,
     is_configured_group,
     link_stats as admin_link_stats,
+    record_private_link_delivery,
     set_batch_guide_message,
     start_batch as admin_start_batch,
     user_request_allowed,
@@ -2641,7 +2642,7 @@ def _guide_text() -> str:
         "Cách nhận link riêng:\n"
         "- /docquyen - xem các link ưu đãi độc quyền\n"
         "- /links - chọn loại link và danh mục bạn muốn\n\n"
-        "Bot sẽ gửi danh sách riêng qua tin nhắn cá nhân, tối đa 15 link cho mỗi danh mục.\n"
+        "Bot sẽ gửi danh sách riêng qua tin nhắn cá nhân, tối đa 25 link cho mỗi danh mục.\n"
         "Lần đầu sử dụng, hãy mở bot và bấm Start để bot có thể gửi tin nhắn cho bạn."
     )
 
@@ -2689,7 +2690,7 @@ def _channel_link_post_text(link_type_id: str, category_id: str, links: list[Adm
     header = [
         f"{link_type_name(link_type_id)} - {category_label(category_id)}",
         "",
-        f"Gom nhanh {len(links[:15])} link đang có trong kho:",
+        f"Gom nhanh {len(links[:20])} link đang có trong kho:",
         "",
     ]
     footer = [
@@ -2698,7 +2699,7 @@ def _channel_link_post_text(link_type_id: str, category_id: str, links: list[Adm
     ]
     lines = header[:]
     truncated = False
-    for index, link in enumerate(links[:15], start=1):
+    for index, link in enumerate(links[:20], start=1):
         display_name = f"{link.display_name} - {link.price}" if link.price else link.display_name
         candidate = [f"{index}. {display_name}", link.affiliate_url, ""]
         if len("\n".join(lines + candidate + footer)) > 3800:
@@ -2803,9 +2804,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not request:
                 await update.message.reply_text("Yeu cau link da het han hoac khong hop le. Hay quay lai group va bam lai /links.")
                 return
-            links = get_links_for_delivery(db, request.link_type_id, request.category_id, limit=25, hard_cap=25)
+            links = get_links_for_delivery(
+                db,
+                request.link_type_id,
+                request.category_id,
+                limit=25,
+                hard_cap=25,
+                telegram_user_id=update.effective_user.id,
+            )
             for text in build_private_link_messages(request.link_type_id, request.category_id, links):
                 await context.bot.send_message(chat_id=update.effective_user.id, text=text, disable_web_page_preview=True)
+            record_private_link_delivery(db, request, links)
             complete_private_request(db, request)
         return
     await update.message.reply_text(
@@ -3126,7 +3135,7 @@ async def publish_category_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("Chua cau hinh TELEGRAM_COMMUNITY_GROUP_ID.")
         return
     with _db() as db:
-        links = get_links_for_delivery(db, link_type_id, category_id, limit=15, hard_cap=15)
+        links = get_links_for_delivery(db, link_type_id, category_id, limit=20, hard_cap=20)
     if not links:
         await query.message.reply_text("Danh muc nay hien chua co link active.")
         return
@@ -3290,7 +3299,7 @@ async def _deliver_private_links(
             else:
                 await _answer_callback(query, "Ban dang yeu cau qua nhanh, vui long thu lai sau.", show_alert=True)
             return
-        links = get_links_for_delivery(db, link_type_id, category_id, limit=25, hard_cap=25)
+        links = get_links_for_delivery(db, link_type_id, category_id, limit=25, hard_cap=25, telegram_user_id=user_id)
     if not links:
         if public_ack:
             await query.message.reply_text("Danh muc nay hien chua co link active.")
@@ -3305,6 +3314,7 @@ async def _deliver_private_links(
         with _db() as db:
             stored = db.get(type(request), request.id)
             if stored:
+                record_private_link_delivery(db, stored, links)
                 complete_private_request(db, stored)
         if public_ack:
             await query.message.reply_text("Minh da gui danh sach vao tin nhan rieng cua ban.")

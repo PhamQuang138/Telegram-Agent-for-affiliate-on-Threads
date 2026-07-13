@@ -276,7 +276,7 @@ def publish_random_links_cron(
         sent = []
         errors = []
         for item in candidates:
-            links = get_links_for_delivery(db, item["link_type_id"], item["category_id"], limit=15, hard_cap=15)
+            links = get_links_for_delivery(db, item["link_type_id"], item["category_id"], limit=20, hard_cap=20)
             if not links:
                 continue
             try:

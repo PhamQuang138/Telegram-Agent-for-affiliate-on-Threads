@@ -42,7 +42,7 @@ python -m app.main
 - Maintain an admin-curated Telegram affiliate link catalog.
 - Store only links sent directly by configured admins in the configured Telegram group.
 - Organize links by campaign type and product category without AI calls.
-- Send requested category links privately to each member, up to 15 links per request.
+- Send requested category links privately to each member, up to 25 links per request while avoiding links that member already received.
 - Keep admin-entered links active for 4 days by default.
 - Generate and publish Threads engagement posts.
 - Reply to Threads engagement posts with a Telegram group CTA.
@@ -394,7 +394,7 @@ Member workflow:
 /links
 ```
 
-The bot shows category/type menus or channel buttons. Public channel posts show up to 15 links. Private requests send up to 25 non-duplicate links for the selected category. If the member has not started the bot, the bot asks them to open the bot and press Start.
+The bot shows category/type menus or channel buttons. Public channel posts show up to 20 links. Private requests send up to 25 links for the selected category and prioritize links that member has not received before. If the member has not started the bot, the bot asks them to open the bot and press Start.
 
 Admin commands:
 
@@ -427,7 +427,7 @@ AUTO_PUBLISH_RANDOM_LINKS_MIN_HOURS=3
 AUTO_PUBLISH_RANDOM_LINKS_MAX_HOURS=6
 ```
 
-Each auto post uses the same public format as `/publishlinks`: up to 15 public links, with buttons for private category links and exclusive links. The publisher remembers recent type/category pairs and avoids repeating them until it runs out of fresh categories.
+Each auto post uses the same public format as `/publishlinks`: up to 20 public links, with buttons for private category links and exclusive links. The publisher remembers recent type/category pairs and avoids repeating them until it runs out of fresh categories.
 
 Call this endpoint from an external cron service every hour:
 
