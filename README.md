@@ -327,10 +327,10 @@ Campaign type -> Product category
 Supported campaign types:
 
 ```text
-shopee_commission   Hoa hong Shopee
-xtra_commission     Hoa hong Xtra
-product_commission  Hoa hong San pham
-exclusive_offer     Uu dai doc quyen
+shopee_commission   Deal Shopee gia tot
+xtra_commission     Deal Xtra hoi
+product_commission  Deal san pham hoi
+exclusive_offer     Deal doc quyen
 ```
 
 Admin workflow. Recommended: run this in private chat with the bot so affiliate links are not exposed in the group.

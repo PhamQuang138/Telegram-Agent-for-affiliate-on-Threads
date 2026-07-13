@@ -1,7 +1,7 @@
 [
   {
     "id": "shopee_commission",
-    "name": "Hoa hồng Shopee",
+    "name": "Deal Shopee giá tốt",
     "short_code": "sh",
     "aliases": [
       "hoa hồng shopee",
@@ -12,7 +12,7 @@
   },
   {
     "id": "xtra_commission",
-    "name": "Hoa hồng Xtra",
+    "name": "Deal Xtra hời",
     "short_code": "xt",
     "aliases": [
       "hoa hồng xtra",
@@ -23,7 +23,7 @@
   },
   {
     "id": "product_commission",
-    "name": "Hoa hồng Sản phẩm",
+    "name": "Deal sản phẩm hời",
     "short_code": "pc",
     "aliases": [
       "hoa hồng sản phẩm",
@@ -34,7 +34,7 @@
   },
   {
     "id": "exclusive_offer",
-    "name": "Ưu đãi độc quyền",
+    "name": "Deal độc quyền",
     "short_code": "ex",
     "aliases": [
       "ưu đãi độc quyền",

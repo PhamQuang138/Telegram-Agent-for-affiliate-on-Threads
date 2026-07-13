@@ -2989,7 +2989,7 @@ async def importlinks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "Gui mot hoac nhieu file CSV vao chat nay, co caption /importlinks hoac khong deu duoc.\n\n"
         f"{forced_line}"
         "Bot se tu phan loai theo cot CSV va ten san pham:\n"
-        "- loai link: Shopee/Xtra/San pham/Doc quyen\n"
+        "- nhom deal: Shopee/Xtra/San pham gia hoi/Doc quyen\n"
         "- danh muc: thoi trang, gia dung, dien tu, the thao...\n\n"
         "Neu file la link doc quyen nhung cot CSV giong link thuong, dung /importlinks docquyen de ep loai.\n"
         "Sau khi import xong, dung /publishlinks de chon danh muc dang len channel.\n"
