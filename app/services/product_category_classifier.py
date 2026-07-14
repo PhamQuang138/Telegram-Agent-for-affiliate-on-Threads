@@ -15,6 +15,7 @@ CATEGORY_SOURCE_FIELDS = (
     "category name",
 )
 STRONG_OVERRIDE_CATEGORY_IDS = {
+    "fashion",
     "sports",
     "electronics",
     "beauty",

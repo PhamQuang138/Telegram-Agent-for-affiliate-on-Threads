@@ -19,7 +19,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import AppSetting
 from app.services.daily_link_cleanup import cleanup_expired_daily_links
-from app.services.admin_curated_links import categories_for_type, cleanup_expired_admin_links, get_links_for_delivery
+from app.services.admin_curated_links import categories_for_type, cleanup_expired_admin_links, get_links_for_delivery, repair_active_link_categories
 from app.services.threads_repository import get_post_by_slug, get_post_link_by_slug, log_click
 from app.telegram_bot import _channel_link_keyboard, _channel_link_post_text, build_application
 
@@ -40,6 +40,8 @@ class DemandIntakeBody(BaseModel):
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    with SessionLocal() as db:
+        repair_active_link_categories(db)
 
 
 @app.get("/health")

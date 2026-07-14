@@ -554,6 +554,42 @@ def get_links_for_delivery(
     return [*fresh, *fallback][:max_links]
 
 
+def repair_active_link_categories(db: Session, limit: int = 5000) -> dict:
+    rows = list(
+        db.scalars(
+            select(AdminAffiliateLink)
+            .where(
+                AdminAffiliateLink.is_active == 1,
+                AdminAffiliateLink.expires_at >= now_utc(),
+            )
+            .order_by(AdminAffiliateLink.id.desc())
+            .limit(max(1, limit))
+        )
+    )
+    changed = 0
+    checked = 0
+    by_category: dict[str, int] = defaultdict(int)
+    for link in rows:
+        checked += 1
+        current_label = category_label(link.category_id)
+        category = classify_product_category(
+            {"category": current_label},
+            product_name=link.display_name,
+            shop_name="",
+        )
+        new_category_id = category["category_id"]
+        if new_category_id == link.category_id:
+            continue
+        if category.get("reason") != "strong product keyword override":
+            continue
+        link.category_id = new_category_id
+        changed += 1
+        by_category[new_category_id] += 1
+    if changed:
+        db.commit()
+    return {"checked": checked, "changed": changed, "by_category": dict(by_category)}
+
+
 def record_private_link_delivery(db: Session, request: PrivateLinkRequest, links: list[AdminAffiliateLink]) -> int:
     urls = [link.affiliate_url.strip() for link in links if link.affiliate_url.strip()]
     if not urls:

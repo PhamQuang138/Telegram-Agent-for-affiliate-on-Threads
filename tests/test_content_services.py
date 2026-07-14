@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from datetime import datetime
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -34,6 +34,7 @@ from app.services.admin_curated_links import (
     ingest_admin_message,
     parse_link_lines,
     record_private_link_delivery,
+    repair_active_link_categories,
     start_batch as start_admin_link_batch,
 )
 from app.services.threads_account_service import get_threads_account, load_threads_accounts, select_account_for_post
@@ -878,6 +879,61 @@ def test_product_category_strong_product_signal_overrides_generic_column() -> No
     )
     assert result["category_id"] == "sports"
     assert result["reason"] == "strong product keyword override"
+
+
+def test_product_category_repairs_phone_and_wallet_from_wrong_pet_column() -> None:
+    phone = classify_product_category(
+        {"Danh mục sản phẩm": "Thú cưng"},
+        product_name="Cường Lực iPhone KK VMOX Tự Dán Tự Hút Bụi, Chống Nhìn Trộm Full Màn Cho iPhone",
+    )
+    wallet = classify_product_category(
+        {"Danh mục sản phẩm": "Thú cưng"},
+        product_name="Ví đựng thẻ tín dụng chống trộm bằng thép không gỉ nhiều ngăn chống RFID",
+    )
+    assert phone["category_id"] == "electronics"
+    assert wallet["category_id"] == "fashion"
+
+
+def test_repair_active_link_categories_updates_wrong_admin_links() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    with Session() as db:
+        batch = start_admin_link_batch(db, 1, "-100", "product_commission", "pets")
+        db.add_all(
+            [
+                AdminAffiliateLink(
+                    batch_id=batch.id,
+                    admin_user_id=1,
+                    group_chat_id="-100",
+                    link_type_id="product_commission",
+                    category_id="pets",
+                    display_name="Cường Lực iPhone KK VMOX Tự Dán Tự Hút Bụi, Chống Nhìn Trộm Full Màn",
+                    affiliate_url="https://s.shopee.vn/phone",
+                    content_hash="phone",
+                    is_active=1,
+                    expires_at=datetime(2099, 1, 1),
+                ),
+                AdminAffiliateLink(
+                    batch_id=batch.id,
+                    admin_user_id=1,
+                    group_chat_id="-100",
+                    link_type_id="product_commission",
+                    category_id="pets",
+                    display_name="Ví đựng thẻ tín dụng chống trộm bằng thép không gỉ nhiều ngăn chống RFID",
+                    affiliate_url="https://s.shopee.vn/wallet",
+                    content_hash="wallet",
+                    is_active=1,
+                    expires_at=datetime(2099, 1, 1),
+                ),
+            ]
+        )
+        db.commit()
+        result = repair_active_link_categories(db)
+        links = {link.affiliate_url: link.category_id for link in db.scalars(select(AdminAffiliateLink)).all()}
+    assert result["changed"] == 2
+    assert links["https://s.shopee.vn/phone"] == "electronics"
+    assert links["https://s.shopee.vn/wallet"] == "fashion"
 
 
 def test_admin_csv_import_aggregates_existing_active_urls(tmp_path) -> None:

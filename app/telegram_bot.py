@@ -141,6 +141,7 @@ from app.services.admin_curated_links import (
     is_configured_group,
     link_stats as admin_link_stats,
     record_private_link_delivery,
+    repair_active_link_categories,
     set_batch_guide_message,
     start_batch as admin_start_batch,
     user_request_allowed,
@@ -3930,6 +3931,8 @@ def build_application() -> Application:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not found")
 
     init_db()
+    with _db() as db:
+        repair_active_link_categories(db)
     if settings.enable_daily_link_auto_cleanup and not settings.vercel:
         cleanup_expired_daily_links(settings.daily_link_retention_days)
     if settings.enable_daily_link_cleanup and not settings.vercel:
