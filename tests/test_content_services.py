@@ -894,6 +894,15 @@ def test_product_category_repairs_phone_and_wallet_from_wrong_pet_column() -> No
     assert wallet["category_id"] == "fashion"
 
 
+def test_product_category_mouse_with_dongle_does_not_match_beauty_kem() -> None:
+    result = classify_product_category(
+        {"Danh mục sản phẩm": "Làm đẹp"},
+        product_name="Chuột Gaming ATK X1 Air + kèm Dongle Gem 8k Sensor PAW3955 Master Nordic 54L15 Siêu Nhẹ 48g",
+    )
+    assert result["category_id"] == "electronics"
+    assert result["reason"] == "strong product keyword override"
+
+
 def test_repair_active_link_categories_updates_wrong_admin_links() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
