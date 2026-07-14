@@ -903,6 +903,25 @@ def test_product_category_mouse_with_dongle_does_not_match_beauty_kem() -> None:
     assert result["reason"] == "strong product keyword override"
 
 
+def test_product_category_separates_home_appliances_and_electronics() -> None:
+    electronics = [
+        "Chuột gaming ATK kèm dongle sensor PAW3955",
+        "Cáp sạc nhanh USB C cho iPhone Samsung",
+        "Tai nghe bluetooth gaming",
+    ]
+    home = [
+        "Quạt mini để bàn sạc pin",
+        "Nồi chiên không dầu dung tích lớn",
+        "Ổ cắm điện thông minh nhiều cổng",
+    ]
+    for name in electronics:
+        result = classify_product_category({"Danh mục sản phẩm": "Gia dụng"}, product_name=name)
+        assert result["category_id"] == "electronics"
+    for name in home:
+        result = classify_product_category({"Danh mục sản phẩm": "Điện tử"}, product_name=name)
+        assert result["category_id"] == "home"
+
+
 def test_repair_active_link_categories_updates_wrong_admin_links() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

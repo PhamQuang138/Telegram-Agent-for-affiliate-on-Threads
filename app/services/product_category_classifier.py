@@ -20,11 +20,78 @@ STRONG_OVERRIDE_CATEGORY_IDS = {
     "electronics",
     "beauty",
     "food",
+    "home",
     "mother_baby",
     "health",
     "automotive",
     "pets",
 }
+PRIORITY_CATEGORY_TERMS = (
+    (
+        "electronics",
+        (
+            "iphone",
+            "ipad",
+            "oppo",
+            "samsung",
+            "xiaomi",
+            "airpod",
+            "dien thoai",
+            "sac du phong",
+            "cu sac",
+            "day sac",
+            "cap sac",
+            "adapter",
+            "tai nghe",
+            "chuot",
+            "chuot gaming",
+            "ban phim",
+            "dongle",
+            "sensor",
+            "paw3955",
+            "8khz",
+            "laptop",
+            "usb",
+            "camera hanh trinh",
+            "kinh cuong luc",
+            "cuong luc",
+            "dan man hinh",
+            "op lung",
+            "bao da ipad",
+            "tan nhiet laptop",
+            "quat tan nhiet",
+        ),
+    ),
+    (
+        "home",
+        (
+            "quat mini",
+            "quat de ban",
+            "quat tich dien",
+            "quat sac",
+            "may hut bui",
+            "robot hut bui",
+            "noi chien",
+            "noi com",
+            "noi lau",
+            "chao",
+            "bep dien",
+            "bep tu",
+            "bep hong ngoai",
+            "may xay",
+            "may ep",
+            "am sieu toc",
+            "binh nuoc",
+            "o cam",
+            "o dien",
+            "den ngu",
+            "den ban",
+            "den led cam bien",
+            "ke bep",
+            "hop dung do",
+        ),
+    ),
+)
 
 
 def load_categories() -> list[dict]:
@@ -103,6 +170,9 @@ def classify_product_category(row: dict, product_name: str = "", shop_name: str 
 
 def _best_product_category(product_name: str = "", shop_name: str = "") -> dict | None:
     haystack = normalize_text(f"{product_name} {shop_name}")
+    priority = _priority_product_category(haystack)
+    if priority:
+        return priority
     best = None
     best_score = 0
     for category in load_categories():
@@ -121,6 +191,18 @@ def _best_product_category(product_name: str = "", shop_name: str = "") -> dict 
 
     if best and best_score > 0:
         return {"category": best, "score": best_score}
+    return None
+
+
+def _priority_product_category(haystack: str) -> dict | None:
+    categories = {item["id"]: item for item in load_categories()}
+    for category_id, terms in PRIORITY_CATEGORY_TERMS:
+        for term in terms:
+            normalized = normalize_text(term)
+            if normalized and _contains_term(haystack, normalized):
+                category = categories.get(category_id)
+                if category:
+                    return {"category": category, "score": 9}
     return None
 
 
